@@ -207,51 +207,33 @@ impl BorderWindow {
         let scale = if self.hidpi { 2.0 } else { 1.0 };
         let w = self.frame.size.width * scale;
         let h = self.frame.size.height * scale;
+        let bw = border_width * scale;
 
-        if w < 2.0 || h < 2.0 {
+        if w < bw * 2.0 || h < bw * 2.0 {
             unsafe { CGContextRelease(ctx) };
             self.needs_redraw = false;
             return;
         }
 
         let full = CGRect::new(0.0, 0.0, w, h);
-        let bw_scaled = border_width * scale;
-        let inner = CGRect::new(bw_scaled, bw_scaled, w - 2.0 * bw_scaled, h - 2.0 * bw_scaled);
 
-        // Clamp radius to fit
-        let max_r = (inner.size.width.min(inner.size.height) / 2.0).max(0.0);
+        // Stroke rect: centered in the border ring so the stroke
+        // straddles the edge between overlay and window area
+        let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, w - bw, h - bw);
+        let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
         let r = (radius * scale).min(max_r);
 
         unsafe {
-            // Clear to transparent
             CGContextClearRect(ctx, full);
 
-            // Fill entire overlay with border color
-            CGContextSetRGBFillColor(ctx, color.r, color.g, color.b, color.a);
-            let fill_path = CGPathCreateMutable();
-            CGPathAddRect(fill_path, ptr::null(), full);
-            CGContextAddPath(ctx, fill_path as CGPathRef);
-            CGContextFillPath(ctx);
-            CGPathRelease(fill_path as CGPathRef);
+            CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b, color.a);
+            CGContextSetLineWidth(ctx, bw);
 
-            // Punch out the inner area (target window region) to transparent
-            if inner.size.width > 0.0 && inner.size.height > 0.0 {
-                CGContextSaveGState(ctx);
-                if r > 0.0 {
-                    let inner_path = CGPathCreateWithRoundedRect(inner, r, r, ptr::null());
-                    if !inner_path.is_null() {
-                        CGContextAddPath(ctx, inner_path);
-                        CGPathRelease(inner_path);
-                    }
-                } else {
-                    let inner_path = CGPathCreateMutable();
-                    CGPathAddRect(inner_path, ptr::null(), inner);
-                    CGContextAddPath(ctx, inner_path as CGPathRef);
-                    CGPathRelease(inner_path as CGPathRef);
-                }
-                CGContextClip(ctx);
-                CGContextClearRect(ctx, full);
-                CGContextRestoreGState(ctx);
+            let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
+            if !path.is_null() {
+                CGContextAddPath(ctx, path);
+                CGContextStrokePath(ctx);
+                CGPathRelease(path);
             }
 
             CGContextFlush(ctx);
