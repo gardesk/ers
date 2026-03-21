@@ -39,16 +39,24 @@ fn main() {
         let wids = discover_windows(cid, own_pid);
         eprintln!("{} windows discovered", wids.len());
 
-        let mut count = 0;
+        let mut overlay_wids = Vec::new();
         for &target in &wids {
             if let Some((_, wid)) = create_overlay(cid, target, border_width) {
                 eprintln!("  border for wid={target} -> overlay={wid}");
-                count += 1;
+                overlay_wids.push(wid);
             } else {
                 eprintln!("  SKIP wid={target}");
             }
         }
-        eprintln!("{count} borders created");
+        eprintln!("{} borders created", overlay_wids.len());
+
+        // Apply click-through AFTER all overlays are created
+        unsafe {
+            let tags: u64 = 1 << 1;
+            for &wid in &overlay_wids {
+                SLSSetWindowTags(cid, wid, &tags, 64);
+            }
+        }
     }
 
     unsafe { CFRunLoopRun() };
