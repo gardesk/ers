@@ -323,6 +323,7 @@ fn main() {
             // Resizes (recreate at final size — includes just-promoted windows)
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
+                    eprintln!("[resize] recreating wid={wid}");
                     borders.recreate(*wid);
                 }
             }
