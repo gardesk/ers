@@ -44,6 +44,20 @@ impl BorderMap {
     /// Add border (event mode, fresh connection since tags poisoned main cid).
     fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
+
+        // Filter: must be ordered in and owned by another process
+        unsafe {
+            let mut shown = false;
+            SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
+            if !shown { return; }
+
+            let mut wid_cid: CGSConnectionID = 0;
+            SLSGetWindowOwner(self.main_cid, target_wid, &mut wid_cid);
+            let mut pid: i32 = 0;
+            SLSConnectionGetPID(wid_cid, &mut pid);
+            if pid == self.own_pid { return; }
+        }
+
         let fresh = unsafe {
             let mut c: CGSConnectionID = 0;
             SLSNewConnection(0, &mut c);
