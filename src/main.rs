@@ -1,6 +1,4 @@
 //! ers — window border renderer
-//!
-//! Sprint 1: static border on a single window by ID.
 
 mod skylight;
 
@@ -15,41 +13,99 @@ fn main() {
         return;
     }
 
-    let target_wid: u32 = match args.get(1) {
-        Some(s) => s.parse().expect("usage: ers <window-id> | --list"),
-        None => {
-            eprintln!("usage: ers <window-id> | --list");
-            std::process::exit(1);
-        }
-    };
-
     let border_width: f64 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
+        .iter()
+        .position(|s| s == "--width" || s == "-w")
+        .and_then(|i| args.get(i + 1)?.parse().ok())
         .unwrap_or(4.0);
 
     let cid = unsafe { SLSMainConnectionID() };
+    let own_pid = unsafe {
+        let mut pid: i32 = 0;
+        pid_for_task(mach_task_self(), &mut pid);
+        pid
+    };
 
-    // Task 1.2: create overlay with solid fill (proven working)
-    let overlay = create_overlay(cid, target_wid, border_width);
-    match overlay {
-        Some((bcid, wid)) => {
-            eprintln!("border wid={wid} for target={target_wid} (cid={bcid})");
+    // Single window mode or all-windows mode
+    if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
+        match create_overlay(target, border_width) {
+            Some((_bcid, wid)) => eprintln!("border wid={wid} for target={target}"),
+            None => {
+                eprintln!("failed to create border for wid {target}");
+                std::process::exit(1);
+            }
         }
-        None => {
-            eprintln!("failed to create border for wid {target_wid}");
-            std::process::exit(1);
+    } else {
+        // Discover all on-screen windows and create borders
+        let wids = discover_windows(cid, own_pid);
+        eprintln!("{} windows discovered", wids.len());
+
+        let mut borders = Vec::new();
+        for &target in &wids {
+            if let Some(overlay) = create_overlay(target, border_width) {
+                borders.push(overlay);
+            }
         }
+        eprintln!("{} borders created", borders.len());
+
+        // Leak to keep alive (no Drop cleanup until exit)
+        std::mem::forget(borders);
     }
 
-    // Keep alive
     unsafe { CFRunLoopRun() };
+}
+
+/// Discover on-screen application windows via CGWindowListCopyWindowInfo.
+/// Returns collected wids after releasing all CF objects.
+fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+        if list.is_null() { return vec![]; }
+
+        let count = CFArrayGetCount(list);
+        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
+        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
+        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
+
+        let mut wids = Vec::new();
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(list, i);
+            if dict.is_null() { continue; }
+
+            let mut v: CFTypeRef = ptr::null();
+
+            let mut wid: u32 = 0;
+            if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+            }
+            if wid == 0 { continue; }
+
+            let mut pid: i32 = 0;
+            if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
+            }
+            if pid == own_pid { continue; }
+
+            let mut layer: i32 = -1;
+            if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
+            }
+            if layer != 0 { continue; }
+
+            wids.push(wid);
+        }
+
+        CFRelease(wid_key as CFTypeRef);
+        CFRelease(pid_key as CFTypeRef);
+        CFRelease(layer_key as CFTypeRef);
+        CFRelease(list);
+        wids
+    }
 }
 
 /// Create a border overlay around `target_wid`.
 /// Returns (border_cid, overlay_wid) on success.
 fn create_overlay(
-    _main_cid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
 ) -> Option<(CGSConnectionID, u32)> {
