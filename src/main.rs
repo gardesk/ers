@@ -262,16 +262,15 @@ fn main() {
                 borders.remove(*wid);
             }
 
-            // Promote pending creates FIRST (so resizes below catch them)
+            // Promote ALL pending creates that weren't destroyed
+            // (the 150ms debounce is enough for tarmac to position them)
             let ready: Vec<u32> = pending.iter()
-                .filter(|wid| (moved.contains(wid) || resized.contains(wid)) && !destroyed.contains(wid))
+                .filter(|wid| !destroyed.contains(wid))
                 .copied()
                 .collect();
-            for wid in ready {
-                pending.remove(&wid);
-                // Don't add yet — let the resize below handle it at final size
-                // Just ensure it's tracked so resize can recreate
-                borders.add_fresh(wid);
+            for wid in &ready {
+                pending.remove(wid);
+                borders.add_fresh(*wid);
             }
 
             // Moves (reposition existing borders)
