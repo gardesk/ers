@@ -23,42 +23,37 @@ impl BorderMap {
         Self { overlays: HashMap::new(), cid, own_pid, border_width }
     }
 
+    /// Check if a wid is one of our overlay windows (not a target).
+    fn is_overlay(&self, wid: u32) -> bool {
+        self.overlays.values().any(|&v| v == wid)
+    }
+
+    /// Add border for a target window. Applies tags to just this overlay.
     fn add(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
         if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
             self.overlays.insert(target_wid, overlay_wid);
+            // Apply tags to just this overlay (not all — that breaks others)
+            unsafe {
+                let tags: u64 = 1 << 1;
+                SLSSetWindowTags(self.cid, overlay_wid, &tags, 64);
+                disable_shadow(overlay_wid);
+            }
         }
     }
 
     fn remove(&mut self, target_wid: u32) {
         if let Some(overlay_wid) = self.overlays.remove(&target_wid) {
-            unsafe {
-                SLSReleaseWindow(self.cid, overlay_wid);
-            }
+            unsafe { SLSReleaseWindow(self.cid, overlay_wid); }
         }
     }
 
-    fn reposition(&self, target_wid: u32) {
-        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
-            unsafe {
-                let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(self.cid, target_wid, &mut bounds) != kCGErrorSuccess {
-                    return;
-                }
-                let bw = self.border_width;
-                let origin = CGPoint {
-                    x: bounds.origin.x - bw,
-                    y: bounds.origin.y - bw,
-                };
-                SLSMoveWindow(self.cid, overlay_wid, &origin);
-            }
-        }
-    }
-
-    fn resize(&mut self, target_wid: u32) {
-        // Remove old overlay and create fresh one at new size
+    /// Recreate overlay at new position/size (move or resize).
+    fn recreate(&mut self, target_wid: u32) {
+        if !self.overlays.contains_key(&target_wid) { return; }
         self.remove(target_wid);
         self.add(target_wid);
+        self.subscribe_target(target_wid);
     }
 
     fn hide(&self, target_wid: u32) {
@@ -76,7 +71,8 @@ impl BorderMap {
         }
     }
 
-    fn apply_tags(&self) {
+    /// Apply tags to ALL overlays (only safe during initial batch creation).
+    fn apply_tags_all(&self) {
         unsafe {
             let tags: u64 = 1 << 1;
             for &overlay_wid in self.overlays.values() {
@@ -86,8 +82,24 @@ impl BorderMap {
         }
     }
 
-    fn overlay_wids(&self) -> Vec<u32> {
-        self.overlays.values().copied().collect()
+    /// Subscribe for events on a single target.
+    fn subscribe_target(&self, target_wid: u32) {
+        unsafe {
+            SLSRequestNotificationsForWindows(self.cid, &target_wid, 1);
+        }
+    }
+
+    /// Subscribe for per-window move/resize events on all tracked targets.
+    fn subscribe_all(&self) {
+        let target_wids: Vec<u32> = self.overlays.keys().copied().collect();
+        if target_wids.is_empty() { return; }
+        unsafe {
+            SLSRequestNotificationsForWindows(
+                self.cid,
+                target_wids.as_ptr(),
+                target_wids.len() as i32,
+            );
+        }
     }
 }
 
@@ -132,28 +144,33 @@ fn main() {
         eprintln!("{} borders created", borders.overlays.len());
     }
 
-    // Apply tags after all overlays exist
-    borders.apply_tags();
+    // Apply tags (batch safe) and subscribe for per-window events
+    borders.apply_tags_all();
+    borders.subscribe_all();
 
     // Process events on background thread
     std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
             match event {
-                Event::Move(wid) => borders.reposition(wid),
-                Event::Resize(wid) => {
-                    borders.resize(wid);
-                    borders.apply_tags();
+                Event::Move(wid) | Event::Resize(wid) => {
+                    if !borders.is_overlay(wid) {
+                        borders.recreate(wid);
+                    }
                 }
-                Event::Close(wid) | Event::Destroy(wid) => borders.remove(wid),
+                Event::Close(wid) | Event::Destroy(wid) => {
+                    if !borders.is_overlay(wid) {
+                        borders.remove(wid);
+                    }
+                }
                 Event::Create(wid) => {
-                    borders.add(wid);
-                    borders.apply_tags();
+                    if !borders.is_overlay(wid) {
+                        borders.add(wid);
+                        borders.subscribe_target(wid);
+                    }
                 }
                 Event::Hide(wid) => borders.hide(wid),
                 Event::Unhide(wid) => borders.unhide(wid),
-                Event::SpaceChange | Event::FrontChange => {
-                    // TODO: Sprint 4 focus handling
-                }
+                Event::SpaceChange | Event::FrontChange => {}
             }
         }
     });
