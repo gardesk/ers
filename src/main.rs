@@ -28,12 +28,19 @@ impl BorderMap {
         self.overlays.values().any(|&v| v == wid)
     }
 
-    /// Add border for a target window. Applies tags to just this overlay.
+    /// Add border without tags (for batch creation).
     fn add(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
         if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
             self.overlays.insert(target_wid, overlay_wid);
-            // Apply tags to just this overlay (not all — that breaks others)
+        }
+    }
+
+    /// Add border with tags (for single event-driven creation).
+    fn add_with_tags(&mut self, target_wid: u32) {
+        if self.overlays.contains_key(&target_wid) { return; }
+        if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
+            self.overlays.insert(target_wid, overlay_wid);
             unsafe {
                 let tags: u64 = 1 << 1;
                 SLSSetWindowTags(self.cid, overlay_wid, &tags, 64);
@@ -52,7 +59,7 @@ impl BorderMap {
     fn recreate(&mut self, target_wid: u32) {
         if !self.overlays.contains_key(&target_wid) { return; }
         self.remove(target_wid);
-        self.add(target_wid);
+        self.add_with_tags(target_wid);
         self.subscribe_target(target_wid);
     }
 
@@ -164,7 +171,7 @@ fn main() {
                 }
                 Event::Create(wid) => {
                     if !borders.is_overlay(wid) {
-                        borders.add(wid);
+                        borders.add_with_tags(wid);
                         borders.subscribe_target(wid);
                     }
                 }
