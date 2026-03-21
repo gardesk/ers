@@ -1,15 +1,12 @@
 //! Border overlay window: create, draw, reposition, destroy.
 //!
 //! Each BorderWindow is a transparent SLS overlay that draws a colored
-//! rounded-rect stroke around a target application window. Follows the
-//! JankyBorders rendering pattern exactly.
+//! rounded-rect border around a target application window.
+//! Uses a fresh SLSNewConnection per border (like JankyBorders).
 
 use crate::config::Color;
 use crate::skylight::*;
 use std::ptr;
-
-/// Padding between the target window edge and the border stroke center.
-const BORDER_PADDING: f64 = 0.0;
 
 pub struct BorderWindow {
     pub cid: CGSConnectionID,
@@ -20,112 +17,82 @@ pub struct BorderWindow {
     pub origin: CGPoint,
     pub focused: bool,
     pub needs_redraw: bool,
-    context: CGContextRef,
     hidpi: bool,
 }
 
 // SAFETY: BorderWindow is only accessed from a single thread (the event loop thread).
-// The raw pointer (context) is a CGContextRef that we create and destroy ourselves.
 unsafe impl Send for BorderWindow {}
 
 impl BorderWindow {
     /// Create a new border overlay for `target_wid`.
-    /// Creates the overlay at the correct size and position from the start
-    /// (no 1x1 + reshape — that path is broken).
-    pub fn new(cid: CGSConnectionID, target_wid: u32, hidpi: bool, border_width: f64) -> Option<Self> {
-        // Fresh SLS connection per border (like JankyBorders border_create)
-        unsafe {
-            let mut border_cid: CGSConnectionID = 0;
-            SLSNewConnection(0, &mut border_cid);
-            if border_cid == 0 {
-                eprintln!("[new] SLSNewConnection failed for target={target_wid}");
-                return None;
-            }
-
-        // Get target window bounds using FRESH connection
-        let mut target_bounds = CGRect::default();
-        let err = SLSGetWindowBounds(border_cid, target_wid, &mut target_bounds);
-        eprintln!("[new] target={target_wid} bounds err={err} pos=({:.0},{:.0}) size=({:.0},{:.0})",
-            target_bounds.origin.x, target_bounds.origin.y,
-            target_bounds.size.width, target_bounds.size.height);
-        if err != kCGErrorSuccess {
-            SLSReleaseConnection(border_cid);
+    pub fn new(_main_cid: CGSConnectionID, target_wid: u32, hidpi: bool, border_width: f64) -> Option<Self> {
+        // Fresh SLS connection per border (like JankyBorders border_create).
+        // Required because SLSCopyManagedDisplaySpaces poisons the main
+        // connection's ability to create visible windows on macOS Tahoe.
+        let mut border_cid: CGSConnectionID = 0;
+        unsafe { SLSNewConnection(0, &mut border_cid) };
+        if border_cid == 0 {
             return None;
         }
 
-        // Calculate overlay frame and position
+        // Get target window bounds
+        let mut target_bounds = CGRect::default();
+        let err = unsafe { SLSGetWindowBounds(border_cid, target_wid, &mut target_bounds) };
+        if err != kCGErrorSuccess {
+            unsafe { SLSReleaseConnection(border_cid) };
+            return None;
+        }
+
+        // Calculate overlay frame (extends border_width beyond target on each side)
         let bw = border_width;
         let overlay_w = target_bounds.size.width + 2.0 * bw;
         let overlay_h = target_bounds.size.height + 2.0 * bw;
         let overlay_x = target_bounds.origin.x - bw;
         let overlay_y = target_bounds.origin.y - bw;
-
         let frame = CGRect::new(0.0, 0.0, overlay_w, overlay_h);
         let origin = CGPoint { x: overlay_x, y: overlay_y };
 
-            let mut region: CFTypeRef = ptr::null();
-            CGSNewRegionWithRect(&frame, &mut region);
+        // Create overlay window at correct position and size
+        let mut region: CFTypeRef = ptr::null();
+        unsafe { CGSNewRegionWithRect(&frame, &mut region) };
+        if region.is_null() {
+            unsafe { SLSReleaseConnection(border_cid) };
+            return None;
+        }
 
-            let mut wid: u32 = 0;
+        let mut wid: u32 = 0;
+        unsafe {
             SLSNewWindow(border_cid, 2, overlay_x as f32, overlay_y as f32, region, &mut wid);
             CFRelease(region);
+        }
+        if wid == 0 {
+            unsafe { SLSReleaseConnection(border_cid) };
+            return None;
+        }
 
-            if wid == 0 {
-                return None;
-            }
-
+        unsafe {
             SLSSetWindowResolution(border_cid, wid, if hidpi { 2.0 } else { 1.0 });
             SLSSetWindowOpacity(border_cid, wid, false);
-            SLSSetWindowLevel(border_cid, wid, 25);
-            SLSOrderWindow(border_cid, wid, 1, 0);
 
-            // Draw solid blue (like smoke2)
-            let ctx = SLWindowContextCreate(border_cid, wid, ptr::null());
-            eprintln!("[new] wid={wid} target={target_wid} cid={border_cid} ctx_null={} pos=({overlay_x:.0},{overlay_y:.0}) size=({overlay_w:.0},{overlay_h:.0})", ctx.is_null());
-            if !ctx.is_null() {
-                let scale = if hidpi { 2.0 } else { 1.0 };
-                let full = CGRect::new(0.0, 0.0, overlay_w * scale, overlay_h * scale);
-                CGContextClearRect(ctx, full);
-                CGContextSetRGBFillColor(ctx, 0.2, 0.5, 0.9, 1.0);
-                let path = CGPathCreateMutable();
-                CGPathAddRect(path, ptr::null(), full);
-                CGContextAddPath(ctx, path as CGPathRef);
-                CGContextFillPath(ctx);
-                CGPathRelease(path as CGPathRef);
-                CGContextFlush(ctx);
-                SLSFlushWindowContentRegion(border_cid, wid, ptr::null());
-                CGContextRelease(ctx);
-            }
+            // Tags: click-through (bit 1) + sticky/all-spaces (bit 9)
+            let set_tags: u64 = (1 << 1) | (1 << 9);
+            SLSSetWindowTags(border_cid, wid, &set_tags, 64);
 
-            Some(Self {
-                cid: border_cid,
-                wid,
-                target_wid,
-                frame,
-                target_bounds,
-                origin,
-                focused: false,
-                needs_redraw: false, // already drawn
-                context: ptr::null_mut(),
-                hidpi,
-            })
+            // Disable shadow
+            disable_shadow(wid);
         }
-    }
 
-    /// Calculate the overlay frame from target bounds and border width.
-    fn calculate_frame(&self, border_width: f64) -> (CGRect, CGPoint) {
-        let offset = border_width + BORDER_PADDING;
-        let frame = CGRect::new(
-            0.0,
-            0.0,
-            self.target_bounds.size.width + 2.0 * offset,
-            self.target_bounds.size.height + 2.0 * offset,
-        );
-        let origin = CGPoint {
-            x: self.target_bounds.origin.x - offset,
-            y: self.target_bounds.origin.y - offset,
-        };
-        (frame, origin)
+        Some(Self {
+            cid: border_cid,
+            wid,
+            target_wid,
+            frame,
+            target_bounds,
+            origin,
+            focused: false,
+            needs_redraw: true,
+            hidpi,
+        })
     }
 
     /// Full update: recalculate bounds, reshape if needed, redraw, reposition.
@@ -141,7 +108,7 @@ impl BorderWindow {
             return;
         }
 
-        // Refresh target bounds from compositor
+        // Refresh target bounds
         let mut new_bounds = CGRect::default();
         let err = unsafe { SLSGetWindowBounds(self.cid, self.target_wid, &mut new_bounds) };
         if err != kCGErrorSuccess {
@@ -149,23 +116,31 @@ impl BorderWindow {
         }
         self.target_bounds = new_bounds;
 
-        // Check if target is ordered in (visible)
+        // Check if target is visible
         let mut shown = false;
         unsafe { SLSWindowIsOrderedIn(self.cid, self.target_wid, &mut shown) };
         if !shown {
-            eprintln!("[border] wid={} target={} NOT SHOWN, hiding", self.wid, self.target_wid);
             self.hide();
             return;
         }
 
-        let (frame, origin) = self.calculate_frame(border_width);
+        let offset = border_width;
+        let frame = CGRect::new(
+            0.0,
+            0.0,
+            self.target_bounds.size.width + 2.0 * offset,
+            self.target_bounds.size.height + 2.0 * offset,
+        );
+        let origin = CGPoint {
+            x: self.target_bounds.origin.x - offset,
+            y: self.target_bounds.origin.y - offset,
+        };
 
-        // Reshape if target size changed
+        // Reshape if size changed
         let size_changed = (frame.size.width - self.frame.size.width).abs() > 0.5
             || (frame.size.height - self.frame.size.height).abs() > 0.5;
 
         if size_changed {
-            eprintln!("[border] wid={} reshaping to {:.0}x{:.0}", self.wid, frame.size.width, frame.size.height);
             unsafe {
                 let mut region: CFTypeRef = ptr::null();
                 CGSNewRegionWithRect(&frame, &mut region);
@@ -180,20 +155,20 @@ impl BorderWindow {
 
         self.origin = origin;
 
-        // Draw if needed
         if self.needs_redraw {
-            eprintln!("[border] wid={} DRAWING at ({:.0},{:.0}) size {:.0}x{:.0}",
-                self.wid, self.origin.x, self.origin.y, self.frame.size.width, self.frame.size.height);
             let color = if self.focused { active_color } else { inactive_color };
             self.draw(color, border_width, radius);
         }
 
-        // Position and order
-        eprintln!("[border] wid={} ORDERING level=25 above-all", self.wid);
+        // Position and order relative to target
         unsafe {
             SLSMoveWindow(self.cid, self.wid, &self.origin);
-            SLSSetWindowLevel(self.cid, self.wid, 25);
-            SLSOrderWindow(self.cid, self.wid, 1, 0);
+
+            let mut level: i64 = 0;
+            SLSGetWindowLevel(self.cid, self.target_wid, &mut level);
+            SLSSetWindowLevel(self.cid, self.wid, level as i32);
+
+            SLSOrderWindow(self.cid, self.wid, border_order, self.target_wid);
         }
     }
 
@@ -210,22 +185,21 @@ impl BorderWindow {
         }
         self.target_bounds = new_bounds;
 
-        let (_, origin) = self.calculate_frame(border_width);
-        self.origin = origin;
+        let offset = border_width;
+        self.origin = CGPoint {
+            x: self.target_bounds.origin.x - offset,
+            y: self.target_bounds.origin.y - offset,
+        };
 
         unsafe {
             SLSMoveWindow(self.cid, self.wid, &self.origin);
         }
     }
 
-    /// Draw the border stroke into the overlay context.
-    /// Currently a debug version: solid red fill, identical to working smoke test.
-    fn draw(&mut self, _color: &Color, _border_width: f64, _radius: f64) {
-        // Get a fresh context every time (matches smoke test pattern)
+    /// Draw the border: fill overlay with color, punch out transparent center.
+    fn draw(&mut self, color: &Color, border_width: f64, radius: f64) {
         let ctx = unsafe { SLWindowContextCreate(self.cid, self.wid, ptr::null()) };
-        eprintln!("[draw] wid={} ctx_null={} cid={}", self.wid, ctx.is_null(), self.cid);
         if ctx.is_null() {
-            eprintln!("[draw] wid={} CONTEXT IS NULL — cannot draw!", self.wid);
             self.needs_redraw = false;
             return;
         }
@@ -233,18 +207,53 @@ impl BorderWindow {
         let scale = if self.hidpi { 2.0 } else { 1.0 };
         let w = self.frame.size.width * scale;
         let h = self.frame.size.height * scale;
-        tracing::info!(wid = self.wid, w, h, "draw: filling solid red");
+
+        if w < 2.0 || h < 2.0 {
+            unsafe { CGContextRelease(ctx) };
+            self.needs_redraw = false;
+            return;
+        }
 
         let full = CGRect::new(0.0, 0.0, w, h);
+        let bw_scaled = border_width * scale;
+        let inner = CGRect::new(bw_scaled, bw_scaled, w - 2.0 * bw_scaled, h - 2.0 * bw_scaled);
+
+        // Clamp radius to fit
+        let max_r = (inner.size.width.min(inner.size.height) / 2.0).max(0.0);
+        let r = (radius * scale).min(max_r);
 
         unsafe {
+            // Clear to transparent
             CGContextClearRect(ctx, full);
-            CGContextSetRGBFillColor(ctx, 1.0, 0.0, 0.0, 1.0);
-            let path = CGPathCreateMutable();
-            CGPathAddRect(path, ptr::null(), full);
-            CGContextAddPath(ctx, path as CGPathRef);
+
+            // Fill entire overlay with border color
+            CGContextSetRGBFillColor(ctx, color.r, color.g, color.b, color.a);
+            let fill_path = CGPathCreateMutable();
+            CGPathAddRect(fill_path, ptr::null(), full);
+            CGContextAddPath(ctx, fill_path as CGPathRef);
             CGContextFillPath(ctx);
-            CGPathRelease(path as CGPathRef);
+            CGPathRelease(fill_path as CGPathRef);
+
+            // Punch out the inner area (target window region) to transparent
+            if inner.size.width > 0.0 && inner.size.height > 0.0 {
+                CGContextSaveGState(ctx);
+                if r > 0.0 {
+                    let inner_path = CGPathCreateWithRoundedRect(inner, r, r, ptr::null());
+                    if !inner_path.is_null() {
+                        CGContextAddPath(ctx, inner_path);
+                        CGPathRelease(inner_path);
+                    }
+                } else {
+                    let inner_path = CGPathCreateMutable();
+                    CGPathAddRect(inner_path, ptr::null(), inner);
+                    CGContextAddPath(ctx, inner_path as CGPathRef);
+                    CGPathRelease(inner_path as CGPathRef);
+                }
+                CGContextClip(ctx);
+                CGContextClearRect(ctx, full);
+                CGContextRestoreGState(ctx);
+            }
+
             CGContextFlush(ctx);
             SLSFlushWindowContentRegion(self.cid, self.wid, ptr::null());
             CGContextRelease(ctx);
@@ -258,12 +267,7 @@ impl BorderWindow {
             return;
         }
         unsafe {
-            let transaction = SLSTransactionCreate(self.cid);
-            if !transaction.is_null() {
-                SLSTransactionOrderWindow(transaction, self.wid, 0, self.target_wid);
-                SLSTransactionCommit(transaction, 0);
-                CFRelease(transaction);
-            }
+            SLSOrderWindow(self.cid, self.wid, 0, 0);
         }
     }
 
@@ -272,28 +276,23 @@ impl BorderWindow {
             return;
         }
         unsafe {
-            let transaction = SLSTransactionCreate(self.cid);
-            if !transaction.is_null() {
-                SLSTransactionOrderWindow(transaction, self.wid, border_order, self.target_wid);
-                SLSTransactionCommit(transaction, 0);
-                CFRelease(transaction);
-            }
+            SLSOrderWindow(self.cid, self.wid, border_order, self.target_wid);
         }
     }
 }
 
 impl Drop for BorderWindow {
     fn drop(&mut self) {
-        if !self.context.is_null() {
-            unsafe { CGContextRelease(self.context) };
-        }
         if self.wid != 0 {
             unsafe { SLSReleaseWindow(self.cid, self.wid) };
+        }
+        if self.cid != 0 {
+            unsafe { SLSReleaseConnection(self.cid) };
         }
     }
 }
 
-/// Disable shadow on an overlay window via SLSWindowSetShadowProperties.
+/// Disable shadow via SLSWindowSetShadowProperties.
 fn disable_shadow(wid: u32) {
     unsafe {
         let density: i64 = 0;
@@ -302,10 +301,11 @@ fn disable_shadow(wid: u32) {
             kCFNumberCFIndexType,
             &density as *const _ as *const _,
         );
-
-        let key_bytes = b"com.apple.WindowShadowDensity\0";
-        let key = CFStringCreateWithCString(ptr::null(), key_bytes.as_ptr(), 0x0800_0100);
-
+        let key = CFStringCreateWithCString(
+            ptr::null(),
+            b"com.apple.WindowShadowDensity\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
         let keys = [key as CFTypeRef];
         let values = [density_cf as CFTypeRef];
         let dict = CFDictionaryCreate(
@@ -316,19 +316,9 @@ fn disable_shadow(wid: u32) {
             &kCFTypeDictionaryKeyCallBacks as *const _ as *const _,
             &kCFTypeDictionaryValueCallBacks as *const _ as *const _,
         );
-
         SLSWindowSetShadowProperties(wid, dict);
-
         CFRelease(dict);
         CFRelease(density_cf);
         CFRelease(key as CFTypeRef);
     }
-}
-
-unsafe extern "C" {
-    fn CFStringCreateWithCString(
-        alloc: CFAllocatorRef,
-        c_str: *const u8,
-        encoding: u32,
-    ) -> CFStringRef;
 }
