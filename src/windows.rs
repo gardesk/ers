@@ -211,7 +211,7 @@ impl WindowTracker {
             return false;
         }
 
-        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi) {
+        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
             tracing::info!(
                 wid,
                 overlay_wid = border.wid,
@@ -221,14 +221,14 @@ impl WindowTracker {
                 h = border.target_bounds.size.height,
                 "created border"
             );
-            // Initial draw — overlay starts at (-9999,-9999) with 1x1 size until update()
-            border.update(
-                &config.active_color,
-                &config.inactive_color,
-                config.border_width,
-                config.radius,
-                config.border_order,
-            );
+            // DISABLED: testing if new() alone produces visible overlays
+            // border.update(
+            //     &config.active_color,
+            //     &config.inactive_color,
+            //     config.border_width,
+            //     config.radius,
+            //     config.border_order,
+            // );
             self.borders.insert(wid, border);
             self.update_notifications();
             true
@@ -355,7 +355,7 @@ impl WindowTracker {
 
     /// Test mode: draw border on a specific window ID.
     pub fn test_wid(&mut self, wid: u32, config: &Config) {
-        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi) {
+        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
             border.focused = true;
             border.update(
                 &config.active_color,
