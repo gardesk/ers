@@ -28,7 +28,7 @@ fn main() {
 
     // Single window mode or all-windows mode
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
-        match create_overlay(target, border_width) {
+        match create_overlay(cid, target, border_width) {
             Some((_bcid, wid)) => eprintln!("border wid={wid} for target={target}"),
             None => {
                 eprintln!("failed to create border for wid {target}");
@@ -42,8 +42,11 @@ fn main() {
 
         let mut borders = Vec::new();
         for &target in &wids {
-            if let Some(overlay) = create_overlay(target, border_width) {
+            if let Some(overlay) = create_overlay(cid, target, border_width) {
+                eprintln!("  border for wid={target} -> overlay={}", overlay.1);
                 borders.push(overlay);
+            } else {
+                eprintln!("  FAILED wid={target}");
             }
         }
         eprintln!("{} borders created", borders.len());
@@ -106,6 +109,7 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
 /// Create a border overlay around `target_wid`.
 /// Returns (border_cid, overlay_wid) on success.
 fn create_overlay(
+    _main_cid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
 ) -> Option<(CGSConnectionID, u32)> {
@@ -152,14 +156,13 @@ fn create_overlay(
             return None;
         }
 
-        // Window properties
-        SLSSetWindowResolution(bcid, wid, 2.0); // HiDPI
-        SLSSetWindowOpacity(bcid, wid, false); // transparent
-        SLSSetWindowLevel(bcid, wid, 1); // above normal
-        SLSOrderWindow(bcid, wid, 1, 0); // order in
+        SLSSetWindowResolution(bcid, wid, 2.0);
+        SLSSetWindowOpacity(bcid, wid, false);
+        SLSSetWindowLevel(bcid, wid, 1);
+        SLSOrderWindow(bcid, wid, 1, 0);
 
-        // Click-through + sticky (visible on all spaces)
-        let tags: u64 = (1 << 1) | (1 << 9);
+        // Click-through only (no sticky — stay on creation space)
+        let tags: u64 = 1 << 1;
         SLSSetWindowTags(bcid, wid, &tags, 64);
 
         // Disable shadow
