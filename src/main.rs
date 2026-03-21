@@ -223,6 +223,8 @@ fn main() {
             // Deduplicate: track which wids need move vs resize
             let mut moved: HashSet<u32> = HashSet::new();
             let mut resized: HashSet<u32> = HashSet::new();
+            let mut created: HashSet<u32> = HashSet::new();
+            let mut destroyed: HashSet<u32> = HashSet::new();
 
             for event in events {
                 match event {
@@ -238,14 +240,16 @@ fn main() {
                     }
                     Event::Close(wid) | Event::Destroy(wid) => {
                         if !borders.is_overlay(wid) {
-                            borders.remove(wid);
+                            destroyed.insert(wid);
+                            created.remove(&wid);
                             moved.remove(&wid);
                             resized.remove(&wid);
                         }
                     }
                     Event::Create(wid) => {
                         if !borders.is_overlay(wid) {
-                            borders.add_fresh(wid);
+                            created.insert(wid);
+                            // Subscribe immediately so we get Move/Resize for it
                             borders.subscribe_target(wid);
                         }
                     }
@@ -255,8 +259,9 @@ fn main() {
                 }
             }
 
-            if !moved.is_empty() || !resized.is_empty() {
-                eprintln!("[batch] moved={:?}, resized={:?}", moved, resized);
+            // Process destroys first
+            for wid in &destroyed {
+                borders.remove(*wid);
             }
 
             // Process moves (just reposition, fast)
@@ -270,6 +275,14 @@ fn main() {
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
+                }
+            }
+
+            // Process creates: only add if NOT destroyed in same batch
+            // and if the window has been moved/resized (tarmac positioned it)
+            for wid in &created {
+                if !destroyed.contains(wid) && (moved.contains(wid) || resized.contains(wid)) {
+                    borders.add_fresh(*wid);
                 }
             }
         }
