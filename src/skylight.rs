@@ -378,6 +378,7 @@ unsafe extern "C" {
     pub fn CGContextSaveGState(ctx: CGContextRef);
     pub fn CGContextRestoreGState(ctx: CGContextRef);
     pub fn CGContextSetInterpolationQuality(ctx: CGContextRef, quality: i32);
+    pub fn CGContextClip(ctx: CGContextRef);
     pub fn CGContextEOClip(ctx: CGContextRef);
     pub fn CGPathCreateWithRoundedRect(
         rect: CGRect,
