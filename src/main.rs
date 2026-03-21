@@ -26,33 +26,29 @@ fn main() {
         pid
     };
 
-    // Single window mode or all-windows mode
+    // Use main cid — CGWindowListCopyWindowInfo doesn't poison it
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
         match create_overlay(cid, target, border_width) {
-            Some((_bcid, wid)) => eprintln!("border wid={wid} for target={target}"),
+            Some((_, wid)) => eprintln!("border for wid={target} -> overlay={wid}"),
             None => {
-                eprintln!("failed to create border for wid {target}");
+                eprintln!("FAILED wid={target}");
                 std::process::exit(1);
             }
         }
     } else {
-        // Discover all on-screen windows and create borders
         let wids = discover_windows(cid, own_pid);
         eprintln!("{} windows discovered", wids.len());
 
-        let mut borders = Vec::new();
+        let mut count = 0;
         for &target in &wids {
-            if let Some(overlay) = create_overlay(cid, target, border_width) {
-                eprintln!("  border for wid={target} -> overlay={}", overlay.1);
-                borders.push(overlay);
+            if let Some((_, wid)) = create_overlay(cid, target, border_width) {
+                eprintln!("  border for wid={target} -> overlay={wid}");
+                count += 1;
             } else {
-                eprintln!("  FAILED wid={target}");
+                eprintln!("  SKIP wid={target}");
             }
         }
-        eprintln!("{} borders created", borders.len());
-
-        // Leak to keep alive (no Drop cleanup until exit)
-        std::mem::forget(borders);
+        eprintln!("{count} borders created");
     }
 
     unsafe { CFRunLoopRun() };
@@ -109,22 +105,19 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
 /// Create a border overlay around `target_wid`.
 /// Returns (border_cid, overlay_wid) on success.
 fn create_overlay(
-    _main_cid: CGSConnectionID,
+    bcid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
 ) -> Option<(CGSConnectionID, u32)> {
     unsafe {
-        // Fresh connection (required — main cid gets poisoned by space queries)
-        let mut bcid: CGSConnectionID = 0;
-        SLSNewConnection(0, &mut bcid);
-        if bcid == 0 {
-            return None;
-        }
-
         // Get target bounds
         let mut bounds = CGRect::default();
         if SLSGetWindowBounds(bcid, target_wid, &mut bounds) != kCGErrorSuccess {
-            SLSReleaseConnection(bcid);
+            return None;
+        }
+
+        // Skip tiny windows
+        if bounds.size.width < 10.0 || bounds.size.height < 10.0 {
             return None;
         }
 
@@ -158,15 +151,8 @@ fn create_overlay(
 
         SLSSetWindowResolution(bcid, wid, 2.0);
         SLSSetWindowOpacity(bcid, wid, false);
-        SLSSetWindowLevel(bcid, wid, 1);
+        SLSSetWindowLevel(bcid, wid, 25);
         SLSOrderWindow(bcid, wid, 1, 0);
-
-        // Click-through only (no sticky — stay on creation space)
-        let tags: u64 = 1 << 1;
-        SLSSetWindowTags(bcid, wid, &tags, 64);
-
-        // Disable shadow
-        disable_shadow(wid);
 
         // Draw border: 4 filled rectangles (no clipping tricks)
         let ctx = SLWindowContextCreate(bcid, wid, ptr::null());
