@@ -45,7 +45,7 @@ impl Default for Config {
             inactive_color: Color::from_hex("#2d2d2d80"),
             radius: 10.0,
             hidpi: true,
-            border_order: -1, // below target by default (like JankyBorders)
+            border_order: 1, // above target — below is barely visible
             active_only: false,
             standalone: false,
             tarmac_socket: None,
