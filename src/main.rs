@@ -60,8 +60,9 @@ impl BorderMap {
     fn remove(&mut self, target_wid: u32) {
         if let Some(overlay) = self.overlays.remove(&target_wid) {
             unsafe {
+                // Order out first — SLSReleaseWindow alone doesn't hide on Tahoe
+                SLSOrderWindow(overlay.cid, overlay.wid, 0, 0);
                 SLSReleaseWindow(overlay.cid, overlay.wid);
-                // Don't release main_cid connections
                 if overlay.cid != self.main_cid {
                     SLSReleaseConnection(overlay.cid);
                 }
@@ -238,6 +239,10 @@ fn main() {
                     Event::Unhide(wid) => borders.unhide(wid),
                     Event::SpaceChange | Event::FrontChange => {}
                 }
+            }
+
+            if !moved.is_empty() || !resized.is_empty() {
+                eprintln!("[batch] moved={:?}, resized={:?}", moved, resized);
             }
 
             // Process moves (just reposition, fast)
