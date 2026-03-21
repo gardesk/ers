@@ -1,149 +1,124 @@
-//! ers — window border renderer for tarmac
+//! ers — window border renderer
 //!
-//! Standalone process that draws colored border overlays around macOS windows
-//! using SkyLight private framework APIs. Tracks window events via
-//! SLSRegisterNotifyProc and renders via CGContext into transparent SLS windows.
+//! Sprint 1: static border on a single window by ID.
 
-mod border;
-mod config;
-mod events;
 mod skylight;
-mod windows;
 
-use config::Config;
-use events::WmEvent;
 use skylight::*;
-use windows::WindowTracker;
-
-use std::sync::mpsc;
+use std::ptr;
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ers=info".parse().unwrap()),
-        )
-        .init();
+    let args: Vec<String> = std::env::args().collect();
 
-    let config = Config::from_args();
-    tracing::info!(
-        width = config.border_width,
-        radius = config.radius,
-        "starting ers"
-    );
+    let target_wid: u32 = match args.get(1) {
+        Some(s) => s.parse().expect("usage: ers <window-id>"),
+        None => {
+            eprintln!("usage: ers <window-id>");
+            eprintln!("  draws a border around the specified window");
+            std::process::exit(1);
+        }
+    };
+
+    let border_width: f64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4.0);
 
     let cid = unsafe { SLSMainConnectionID() };
-    if cid == 0 {
-        eprintln!("failed to get SLS connection — not running in a WindowServer session?");
-        std::process::exit(1);
+
+    // Task 1.2: create overlay with solid fill (proven working)
+    let overlay = create_overlay(cid, target_wid, border_width);
+    match overlay {
+        Some((bcid, wid)) => {
+            eprintln!("border wid={wid} for target={target_wid} (cid={bcid})");
+        }
+        None => {
+            eprintln!("failed to create border for wid {target_wid}");
+            std::process::exit(1);
+        }
     }
 
-    let (tx, rx) = mpsc::channel::<WmEvent>();
-
-    events::init(tx);
-    events::register(cid);
-    setup_event_port(cid);
-
-    let mut tracker = WindowTracker::new(cid);
-    tracker.add_existing_windows(&config);
-    tracker.determine_focus(&config);
-
-    tracing::info!(borders = tracker.border_count(), "initial borders created");
-
-    let config_clone = config.clone();
-    std::thread::spawn(move || {
-        event_loop(rx, &mut tracker, &config_clone);
-    });
-
-    tracing::info!("entering CFRunLoop");
+    // Keep alive
     unsafe { CFRunLoopRun() };
 }
 
-/// Process events from the channel.
-fn event_loop(rx: mpsc::Receiver<WmEvent>, tracker: &mut WindowTracker, config: &Config) {
-    while let Ok(event) = rx.recv() {
-        match event {
-            WmEvent::WindowMove(wid) => {
-                tracker.move_window(wid, config);
-            }
-            WmEvent::WindowResize(wid)
-            | WmEvent::WindowReorder(wid)
-            | WmEvent::WindowLevel(wid) => {
-                tracker.update_window(wid, config);
-            }
-            WmEvent::WindowClose(wid) => {
-                tracker.destroy_border(wid);
-            }
-            WmEvent::WindowCreate { wid, .. } => {
-                if tracker.create_border(wid, config) {
-                    tracker.determine_focus(config);
-                }
-            }
-            WmEvent::WindowDestroy { wid, .. } => {
-                tracker.destroy_border(wid);
-                tracker.determine_focus(config);
-            }
-            WmEvent::WindowHide(wid) => {
-                tracker.hide_window(wid);
-            }
-            WmEvent::WindowUnhide(wid) => {
-                tracker.unhide_window(wid, config);
-            }
-            WmEvent::SpaceChange => {
-                tracker.update_all(config);
-            }
-            WmEvent::FrontAppChange | WmEvent::FocusCheck => {
-                tracker.determine_focus(config);
-            }
-        }
-    }
-}
-
-/// Set up the SLS event port on the current thread's CFRunLoop.
-fn setup_event_port(cid: CGSConnectionID) {
+/// Create a border overlay around `target_wid`.
+/// Returns (border_cid, overlay_wid) on success.
+fn create_overlay(
+    _main_cid: CGSConnectionID,
+    target_wid: u32,
+    border_width: f64,
+) -> Option<(CGSConnectionID, u32)> {
     unsafe {
-        let mut port: u32 = 0;
-        let err = SLSGetEventPort(cid, &mut port);
-        if err != kCGErrorSuccess {
-            return;
+        // Fresh connection (required — main cid gets poisoned by space queries)
+        let mut bcid: CGSConnectionID = 0;
+        SLSNewConnection(0, &mut bcid);
+        if bcid == 0 {
+            return None;
         }
 
-        let cf_mach_port = CFMachPortCreateWithPort(
-            std::ptr::null(),
-            port,
-            event_port_callback as *const _,
-            std::ptr::null(),
-            false,
+        // Get target bounds
+        let mut bounds = CGRect::default();
+        if SLSGetWindowBounds(bcid, target_wid, &mut bounds) != kCGErrorSuccess {
+            SLSReleaseConnection(bcid);
+            return None;
+        }
+
+        let bw = border_width;
+        let ow = bounds.size.width + 2.0 * bw;
+        let oh = bounds.size.height + 2.0 * bw;
+        let ox = bounds.origin.x - bw;
+        let oy = bounds.origin.y - bw;
+
+        eprintln!(
+            "target: ({:.0},{:.0}) {:.0}x{:.0}  overlay: ({ox:.0},{oy:.0}) {ow:.0}x{oh:.0}",
+            bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
         );
 
-        if cf_mach_port.is_null() {
-            return;
+        // Create overlay at correct position and size
+        let frame = CGRect::new(0.0, 0.0, ow, oh);
+        let mut region: CFTypeRef = ptr::null();
+        CGSNewRegionWithRect(&frame, &mut region);
+        if region.is_null() {
+            SLSReleaseConnection(bcid);
+            return None;
         }
 
-        _CFMachPortSetOptions(cf_mach_port, 0x40);
-
-        let source = CFMachPortCreateRunLoopSource(std::ptr::null(), cf_mach_port, 0);
-        if !source.is_null() {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
-            CFRelease(source);
+        let mut wid: u32 = 0;
+        SLSNewWindow(bcid, 2, ox as f32, oy as f32, region, &mut wid);
+        CFRelease(region);
+        if wid == 0 {
+            SLSReleaseConnection(bcid);
+            return None;
         }
-        CFRelease(cf_mach_port);
-    }
-}
 
-/// Callback for the SLS event mach port — drains pending events.
-unsafe extern "C" fn event_port_callback(
-    _port: CFMachPortRef,
-    _message: *mut std::ffi::c_void,
-    _size: i64,
-    _context: *mut std::ffi::c_void,
-) {
-    unsafe {
-        let cid = SLSMainConnectionID();
-        let mut event = SLEventCreateNextEvent(cid);
-        while !event.is_null() {
-            CFRelease(event as CFTypeRef);
-            event = SLEventCreateNextEvent(cid);
+        // Window properties
+        SLSSetWindowResolution(bcid, wid, 2.0); // HiDPI
+        SLSSetWindowOpacity(bcid, wid, false); // transparent
+        SLSSetWindowLevel(bcid, wid, 1); // above normal
+        SLSOrderWindow(bcid, wid, 1, 0); // order in
+
+        // Draw solid fill (proven to show on all 4 sides)
+        let ctx = SLWindowContextCreate(bcid, wid, ptr::null());
+        if ctx.is_null() {
+            SLSReleaseWindow(bcid, wid);
+            SLSReleaseConnection(bcid);
+            return None;
         }
+
+        let scale = 2.0;
+        let full = CGRect::new(0.0, 0.0, ow * scale, oh * scale);
+        CGContextClearRect(ctx, full);
+        CGContextSetRGBFillColor(ctx, 0.32, 0.58, 0.89, 1.0);
+        let path = CGPathCreateMutable();
+        CGPathAddRect(path, ptr::null(), full);
+        CGContextAddPath(ctx, path as CGPathRef);
+        CGContextFillPath(ctx);
+        CGPathRelease(path as CGPathRef);
+        CGContextFlush(ctx);
+        SLSFlushWindowContentRegion(bcid, wid, ptr::null());
+        CGContextRelease(ctx);
+
+        Some((bcid, wid))
     }
 }

@@ -394,6 +394,7 @@ unsafe extern "C" {
     );
     pub fn CGContextSetLineWidth(ctx: CGContextRef, width: f64);
     pub fn CGContextClearRect(ctx: CGContextRef, rect: CGRect);
+    pub fn CGContextEOFillPath(ctx: CGContextRef);
     pub fn CGContextAddPath(ctx: CGContextRef, path: CGPathRef);
     pub fn CGContextStrokePath(ctx: CGContextRef);
     pub fn CGContextFillPath(ctx: CGContextRef);
