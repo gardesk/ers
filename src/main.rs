@@ -1,9 +1,95 @@
 //! ers — window border renderer
 
+mod events;
 mod skylight;
 
+use events::Event;
 use skylight::*;
+use std::collections::HashMap;
 use std::ptr;
+use std::sync::mpsc;
+
+/// Tracks overlay wid for each target wid.
+struct BorderMap {
+    /// target_wid → overlay_wid
+    overlays: HashMap<u32, u32>,
+    cid: CGSConnectionID,
+    own_pid: i32,
+    border_width: f64,
+}
+
+impl BorderMap {
+    fn new(cid: CGSConnectionID, own_pid: i32, border_width: f64) -> Self {
+        Self { overlays: HashMap::new(), cid, own_pid, border_width }
+    }
+
+    fn add(&mut self, target_wid: u32) {
+        if self.overlays.contains_key(&target_wid) { return; }
+        if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
+            self.overlays.insert(target_wid, overlay_wid);
+        }
+    }
+
+    fn remove(&mut self, target_wid: u32) {
+        if let Some(overlay_wid) = self.overlays.remove(&target_wid) {
+            unsafe {
+                SLSReleaseWindow(self.cid, overlay_wid);
+            }
+        }
+    }
+
+    fn reposition(&self, target_wid: u32) {
+        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
+            unsafe {
+                let mut bounds = CGRect::default();
+                if SLSGetWindowBounds(self.cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                    return;
+                }
+                let bw = self.border_width;
+                let origin = CGPoint {
+                    x: bounds.origin.x - bw,
+                    y: bounds.origin.y - bw,
+                };
+                SLSMoveWindow(self.cid, overlay_wid, &origin);
+            }
+        }
+    }
+
+    fn resize(&mut self, target_wid: u32) {
+        // Remove old overlay and create fresh one at new size
+        self.remove(target_wid);
+        self.add(target_wid);
+    }
+
+    fn hide(&self, target_wid: u32) {
+        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
+            unsafe { SLSOrderWindow(self.cid, overlay_wid, 0, 0); }
+        }
+    }
+
+    fn unhide(&self, target_wid: u32) {
+        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
+            unsafe {
+                SLSSetWindowLevel(self.cid, overlay_wid, 25);
+                SLSOrderWindow(self.cid, overlay_wid, 1, 0);
+            }
+        }
+    }
+
+    fn apply_tags(&self) {
+        unsafe {
+            let tags: u64 = 1 << 1;
+            for &overlay_wid in self.overlays.values() {
+                SLSSetWindowTags(self.cid, overlay_wid, &tags, 64);
+                disable_shadow(overlay_wid);
+            }
+        }
+    }
+
+    fn overlay_wids(&self) -> Vec<u32> {
+        self.overlays.values().copied().collect()
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -26,45 +112,82 @@ fn main() {
         pid
     };
 
-    // Use main cid — CGWindowListCopyWindowInfo doesn't poison it
+    // Event channel
+    let (tx, rx) = mpsc::channel();
+    events::init(tx, own_pid);
+    events::register(cid);
+    setup_event_port(cid);
+
+    // Discover and create borders
+    let mut borders = BorderMap::new(cid, own_pid, border_width);
+
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
-        match create_overlay(cid, target, border_width) {
-            Some((_, wid)) => eprintln!("border for wid={target} -> overlay={wid}"),
-            None => {
-                eprintln!("FAILED wid={target}");
-                std::process::exit(1);
-            }
-        }
+        borders.add(target);
     } else {
         let wids = discover_windows(cid, own_pid);
         eprintln!("{} windows discovered", wids.len());
-
-        let mut overlay_wids = Vec::new();
-        for &target in &wids {
-            if let Some((_, wid)) = create_overlay(cid, target, border_width) {
-                eprintln!("  border for wid={target} -> overlay={wid}");
-                overlay_wids.push(wid);
-            } else {
-                eprintln!("  SKIP wid={target}");
-            }
+        for &wid in &wids {
+            borders.add(wid);
         }
-        eprintln!("{} borders created", overlay_wids.len());
-
-        // Apply click-through + shadow AFTER all overlays are created
-        unsafe {
-            let tags: u64 = 1 << 1;
-            for &wid in &overlay_wids {
-                SLSSetWindowTags(cid, wid, &tags, 64);
-                disable_shadow(wid);
-            }
-        }
+        eprintln!("{} borders created", borders.overlays.len());
     }
+
+    // Apply tags after all overlays exist
+    borders.apply_tags();
+
+    // Process events on background thread
+    std::thread::spawn(move || {
+        while let Ok(event) = rx.recv() {
+            match event {
+                Event::Move(wid) => borders.reposition(wid),
+                Event::Resize(wid) => {
+                    borders.resize(wid);
+                    borders.apply_tags();
+                }
+                Event::Close(wid) | Event::Destroy(wid) => borders.remove(wid),
+                Event::Create(wid) => {
+                    borders.add(wid);
+                    borders.apply_tags();
+                }
+                Event::Hide(wid) => borders.hide(wid),
+                Event::Unhide(wid) => borders.unhide(wid),
+                Event::SpaceChange | Event::FrontChange => {
+                    // TODO: Sprint 4 focus handling
+                }
+            }
+        }
+    });
 
     unsafe { CFRunLoopRun() };
 }
 
-/// Discover on-screen application windows via CGWindowListCopyWindowInfo.
-/// Returns collected wids after releasing all CF objects.
+fn setup_event_port(cid: CGSConnectionID) {
+    unsafe {
+        let mut port: u32 = 0;
+        if SLSGetEventPort(cid, &mut port) != kCGErrorSuccess { return; }
+        let cf_port = CFMachPortCreateWithPort(ptr::null(), port, drain_events as *const _, ptr::null(), false);
+        if cf_port.is_null() { return; }
+        _CFMachPortSetOptions(cf_port, 0x40);
+        let source = CFMachPortCreateRunLoopSource(ptr::null(), cf_port, 0);
+        if !source.is_null() {
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+            CFRelease(source);
+        }
+        CFRelease(cf_port);
+    }
+}
+
+unsafe extern "C" fn drain_events(_: CFMachPortRef, _: *mut std::ffi::c_void, _: i64, _: *mut std::ffi::c_void) {
+    unsafe {
+        let cid = SLSMainConnectionID();
+        let mut ev = SLEventCreateNextEvent(cid);
+        while !ev.is_null() {
+            CFRelease(ev as CFTypeRef);
+            ev = SLEventCreateNextEvent(cid);
+        }
+    }
+}
+
 fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
@@ -81,7 +204,6 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
             if dict.is_null() { continue; }
 
             let mut v: CFTypeRef = ptr::null();
-
             let mut wid: u32 = 0;
             if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
@@ -111,21 +233,16 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     }
 }
 
-/// Create a border overlay around `target_wid`.
-/// Returns (border_cid, overlay_wid) on success.
 fn create_overlay(
-    bcid: CGSConnectionID,
+    cid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
 ) -> Option<(CGSConnectionID, u32)> {
     unsafe {
-        // Get target bounds
         let mut bounds = CGRect::default();
-        if SLSGetWindowBounds(bcid, target_wid, &mut bounds) != kCGErrorSuccess {
+        if SLSGetWindowBounds(cid, target_wid, &mut bounds) != kCGErrorSuccess {
             return None;
         }
-
-        // Skip tiny windows
         if bounds.size.width < 10.0 || bounds.size.height < 10.0 {
             return None;
         }
@@ -136,56 +253,38 @@ fn create_overlay(
         let ox = bounds.origin.x - bw;
         let oy = bounds.origin.y - bw;
 
-        eprintln!(
-            "target: ({:.0},{:.0}) {:.0}x{:.0}  overlay: ({ox:.0},{oy:.0}) {ow:.0}x{oh:.0}",
-            bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
-        );
-
-        // Create overlay at correct position and size
         let frame = CGRect::new(0.0, 0.0, ow, oh);
         let mut region: CFTypeRef = ptr::null();
         CGSNewRegionWithRect(&frame, &mut region);
-        if region.is_null() {
-            SLSReleaseConnection(bcid);
-            return None;
-        }
+        if region.is_null() { return None; }
 
         let mut wid: u32 = 0;
-        SLSNewWindow(bcid, 2, ox as f32, oy as f32, region, &mut wid);
+        SLSNewWindow(cid, 2, ox as f32, oy as f32, region, &mut wid);
         CFRelease(region);
-        if wid == 0 {
-            SLSReleaseConnection(bcid);
-            return None;
-        }
+        if wid == 0 { return None; }
 
-        SLSSetWindowResolution(bcid, wid, 2.0);
-        SLSSetWindowOpacity(bcid, wid, false);
-        SLSSetWindowLevel(bcid, wid, 25);
-        SLSOrderWindow(bcid, wid, 1, 0);
+        SLSSetWindowResolution(cid, wid, 2.0);
+        SLSSetWindowOpacity(cid, wid, false);
+        SLSSetWindowLevel(cid, wid, 25);
+        SLSOrderWindow(cid, wid, 1, 0);
 
-        // Draw border: 4 filled rectangles (no clipping tricks)
-        let ctx = SLWindowContextCreate(bcid, wid, ptr::null());
+        // Draw border (point coordinates)
+        let ctx = SLWindowContextCreate(cid, wid, ptr::null());
         if ctx.is_null() {
-            SLSReleaseWindow(bcid, wid);
-            SLSReleaseConnection(bcid);
+            SLSReleaseWindow(cid, wid);
             return None;
         }
 
-        // Context is in POINTS, not pixels (SLSSetWindowResolution handles HiDPI)
-        let w = ow;
-        let h = oh;
-        let b = bw;
-        let full = CGRect::new(0.0, 0.0, w, h);
+        let full = CGRect::new(0.0, 0.0, ow, oh);
         CGContextClearRect(ctx, full);
 
-        // Rounded border via stroke path (point coordinates)
+        let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, ow - bw, oh - bw);
         let radius = 10.0_f64;
-        let stroke_rect = CGRect::new(b / 2.0, b / 2.0, w - b, h - b);
         let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
         let r = radius.min(max_r);
 
         CGContextSetRGBStrokeColor(ctx, 0.32, 0.58, 0.89, 1.0);
-        CGContextSetLineWidth(ctx, b);
+        CGContextSetLineWidth(ctx, bw);
         let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
         if !path.is_null() {
             CGContextAddPath(ctx, path);
@@ -194,14 +293,13 @@ fn create_overlay(
         }
 
         CGContextFlush(ctx);
-        SLSFlushWindowContentRegion(bcid, wid, ptr::null());
+        SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
-        Some((bcid, wid))
+        Some((cid, wid))
     }
 }
 
-/// List on-screen windows with positions.
 fn list_windows() {
     let cid = unsafe { SLSMainConnectionID() };
     unsafe {
@@ -209,11 +307,9 @@ fn list_windows() {
         if list.is_null() { return; }
         let count = CFArrayGetCount(list);
         let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
-        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
         let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
-        let name_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerName\0".as_ptr(), kCFStringEncodingUTF8);
 
-        eprintln!("{:>6}  {:>5}  {:>8}  {:>8}  {:>6}  {:>6}", "wid", "layer", "x", "y", "w", "h");
+        eprintln!("{:>6}  {:>8}  {:>8}  {:>6}  {:>6}", "wid", "x", "y", "w", "h");
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
             if dict.is_null() { continue; }
@@ -231,37 +327,23 @@ fn list_windows() {
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(cid, wid, &mut bounds);
-
-            eprintln!("{wid:>6}  {layer:>5}  {:>8.0}  {:>8.0}  {:>6.0}  {:>6.0}",
+            eprintln!("{wid:>6}  {:>8.0}  {:>8.0}  {:>6.0}  {:>6.0}",
                 bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height);
         }
         CFRelease(wid_key as CFTypeRef);
-        CFRelease(pid_key as CFTypeRef);
         CFRelease(layer_key as CFTypeRef);
-        CFRelease(name_key as CFTypeRef);
         CFRelease(list);
     }
 }
 
 unsafe fn disable_shadow(wid: u32) {
     let density: i64 = 0;
-    let density_cf = CFNumberCreate(
-        ptr::null(),
-        kCFNumberCFIndexType,
-        &density as *const _ as *const _,
-    );
-    let key = CFStringCreateWithCString(
-        ptr::null(),
-        b"com.apple.WindowShadowDensity\0".as_ptr(),
-        kCFStringEncodingUTF8,
-    );
+    let density_cf = CFNumberCreate(ptr::null(), kCFNumberCFIndexType, &density as *const _ as *const _);
+    let key = CFStringCreateWithCString(ptr::null(), b"com.apple.WindowShadowDensity\0".as_ptr(), kCFStringEncodingUTF8);
     let keys = [key as CFTypeRef];
     let values = [density_cf as CFTypeRef];
     let dict = CFDictionaryCreate(
-        ptr::null(),
-        keys.as_ptr(),
-        values.as_ptr(),
-        1,
+        ptr::null(), keys.as_ptr(), values.as_ptr(), 1,
         &kCFTypeDictionaryKeyCallBacks as *const _ as *const _,
         &kCFTypeDictionaryValueCallBacks as *const _ as *const _,
     );
