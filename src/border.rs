@@ -33,10 +33,23 @@ impl BorderWindow {
     /// Creates the overlay at the correct size and position from the start
     /// (no 1x1 + reshape — that path is broken).
     pub fn new(cid: CGSConnectionID, target_wid: u32, hidpi: bool, border_width: f64) -> Option<Self> {
-        // Get target window bounds from compositor
+        // Fresh SLS connection per border (like JankyBorders border_create)
+        unsafe {
+            let mut border_cid: CGSConnectionID = 0;
+            SLSNewConnection(0, &mut border_cid);
+            if border_cid == 0 {
+                eprintln!("[new] SLSNewConnection failed for target={target_wid}");
+                return None;
+            }
+
+        // Get target window bounds using FRESH connection
         let mut target_bounds = CGRect::default();
-        let err = unsafe { SLSGetWindowBounds(cid, target_wid, &mut target_bounds) };
+        let err = SLSGetWindowBounds(border_cid, target_wid, &mut target_bounds);
+        eprintln!("[new] target={target_wid} bounds err={err} pos=({:.0},{:.0}) size=({:.0},{:.0})",
+            target_bounds.origin.x, target_bounds.origin.y,
+            target_bounds.size.width, target_bounds.size.height);
         if err != kCGErrorSuccess {
+            SLSReleaseConnection(border_cid);
             return None;
         }
 
@@ -50,27 +63,25 @@ impl BorderWindow {
         let frame = CGRect::new(0.0, 0.0, overlay_w, overlay_h);
         let origin = CGPoint { x: overlay_x, y: overlay_y };
 
-        // === INLINE EVERYTHING like smoke2 (proven working) ===
-        unsafe {
             let mut region: CFTypeRef = ptr::null();
             CGSNewRegionWithRect(&frame, &mut region);
 
             let mut wid: u32 = 0;
-            SLSNewWindow(cid, 2, overlay_x as f32, overlay_y as f32, region, &mut wid);
+            SLSNewWindow(border_cid, 2, overlay_x as f32, overlay_y as f32, region, &mut wid);
             CFRelease(region);
 
             if wid == 0 {
                 return None;
             }
 
-            SLSSetWindowResolution(cid, wid, if hidpi { 2.0 } else { 1.0 });
-            SLSSetWindowOpacity(cid, wid, false);
-            SLSSetWindowLevel(cid, wid, 25);
-            SLSOrderWindow(cid, wid, 1, 0);
+            SLSSetWindowResolution(border_cid, wid, if hidpi { 2.0 } else { 1.0 });
+            SLSSetWindowOpacity(border_cid, wid, false);
+            SLSSetWindowLevel(border_cid, wid, 25);
+            SLSOrderWindow(border_cid, wid, 1, 0);
 
             // Draw solid blue (like smoke2)
-            let ctx = SLWindowContextCreate(cid, wid, ptr::null());
-            eprintln!("[new] wid={wid} target={target_wid} ctx_null={} pos=({overlay_x:.0},{overlay_y:.0}) size=({overlay_w:.0},{overlay_h:.0})", ctx.is_null());
+            let ctx = SLWindowContextCreate(border_cid, wid, ptr::null());
+            eprintln!("[new] wid={wid} target={target_wid} cid={border_cid} ctx_null={} pos=({overlay_x:.0},{overlay_y:.0}) size=({overlay_w:.0},{overlay_h:.0})", ctx.is_null());
             if !ctx.is_null() {
                 let scale = if hidpi { 2.0 } else { 1.0 };
                 let full = CGRect::new(0.0, 0.0, overlay_w * scale, overlay_h * scale);
@@ -82,12 +93,12 @@ impl BorderWindow {
                 CGContextFillPath(ctx);
                 CGPathRelease(path as CGPathRef);
                 CGContextFlush(ctx);
-                SLSFlushWindowContentRegion(cid, wid, ptr::null());
+                SLSFlushWindowContentRegion(border_cid, wid, ptr::null());
                 CGContextRelease(ctx);
             }
 
             Some(Self {
-                cid,
+                cid: border_cid,
                 wid,
                 target_wid,
                 frame,
