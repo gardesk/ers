@@ -196,7 +196,10 @@ fn main() {
                 Err(_) => break,
             };
 
-            // Drain all queued events (coalesce burst)
+            // Wait briefly for more events to arrive (debounce)
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            // Drain all queued events
             let mut events = vec![first];
             while let Ok(e) = rx.try_recv() {
                 events.push(e);
