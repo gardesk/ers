@@ -310,6 +310,8 @@ fn main() {
                 pending.remove(&wid);
                 if !skip.contains(&wid) {
                     borders.add_fresh(wid);
+                    // Re-subscribe so we get future move/resize events
+                    borders.subscribe_target(wid);
                 }
             }
 
@@ -323,8 +325,8 @@ fn main() {
             // Resizes (recreate at final size — includes just-promoted windows)
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
-                    eprintln!("[resize] recreating wid={wid}");
                     borders.recreate(*wid);
+                    borders.subscribe_target(*wid);
                 }
             }
         }
