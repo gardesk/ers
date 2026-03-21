@@ -260,6 +260,18 @@ fn main() {
                 borders.remove(*wid);
             }
 
+            // Promote pending creates FIRST (so resizes below catch them)
+            let ready: Vec<u32> = pending.iter()
+                .filter(|wid| (moved.contains(wid) || resized.contains(wid)) && !destroyed.contains(wid))
+                .copied()
+                .collect();
+            for wid in ready {
+                pending.remove(&wid);
+                // Don't add yet — let the resize below handle it at final size
+                // Just ensure it's tracked so resize can recreate
+                borders.add_fresh(wid);
+            }
+
             // Moves (reposition existing borders)
             for wid in &moved {
                 if !resized.contains(wid) && borders.overlays.contains_key(wid) {
@@ -267,21 +279,11 @@ fn main() {
                 }
             }
 
-            // Resizes (recreate existing borders)
+            // Resizes (recreate at final size — includes just-promoted windows)
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
                 }
-            }
-
-            // Pending creates: promote if we saw a move/resize (tarmac positioned it)
-            let ready: Vec<u32> = pending.iter()
-                .filter(|wid| (moved.contains(wid) || resized.contains(wid)) && !destroyed.contains(wid))
-                .copied()
-                .collect();
-            for wid in ready {
-                pending.remove(&wid);
-                borders.add_fresh(wid);
             }
         }
     });
