@@ -117,21 +117,19 @@ fn create_overlay(
         let full = CGRect::new(0.0, 0.0, w, h);
         CGContextClearRect(ctx, full);
 
-        CGContextSetRGBFillColor(ctx, 0.32, 0.58, 0.89, 1.0);
+        // Rounded border via stroke path (point coordinates)
+        let radius = 10.0_f64;
+        let stroke_rect = CGRect::new(b / 2.0, b / 2.0, w - b, h - b);
+        let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
+        let r = radius.min(max_r);
 
-        // 4 border strips
-        let strips = [
-            CGRect::new(0.0, 0.0, w, b),           // bottom
-            CGRect::new(0.0, h - b, w, b),          // top
-            CGRect::new(0.0, b, b, h - 2.0 * b),    // left
-            CGRect::new(w - b, b, b, h - 2.0 * b),  // right
-        ];
-        for rect in &strips {
-            let p = CGPathCreateMutable();
-            CGPathAddRect(p, ptr::null(), *rect);
-            CGContextAddPath(ctx, p as CGPathRef);
-            CGContextFillPath(ctx);
-            CGPathRelease(p as CGPathRef);
+        CGContextSetRGBStrokeColor(ctx, 0.32, 0.58, 0.89, 1.0);
+        CGContextSetLineWidth(ctx, b);
+        let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
+        if !path.is_null() {
+            CGContextAddPath(ctx, path);
+            CGContextStrokePath(ctx);
+            CGPathRelease(path);
         }
 
         CGContextFlush(ctx);
