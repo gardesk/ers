@@ -124,8 +124,8 @@ impl WindowTracker {
                 kCFNumberSInt64Type,
             );
 
-            let mut set_tags: u64 = 1;
-            let mut clear_tags: u64 = 0;
+            let set_tags: u64 = 1;
+            let clear_tags: u64 = 0;
             let window_list = SLSCopyWindowsWithOptionsAndTags(
                 cid, 0, space_list, 0x2, &set_tags, &clear_tags,
             );
@@ -350,8 +350,8 @@ fn get_front_window(cid: CGSConnectionID) -> u32 {
         let mut target_cid: CGSConnectionID = 0;
         SLSGetConnectionIDForPSN(cid, &mut psn, &mut target_cid);
 
-        let mut set_tags: u64 = 1;
-        let mut clear_tags: u64 = 0;
+        let set_tags: u64 = 1;
+        let clear_tags: u64 = 0;
         let space_list = cfarray_of_cfnumbers(
             &active_sid as *const _ as *const _,
             std::mem::size_of::<u64>(),

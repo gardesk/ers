@@ -483,19 +483,21 @@ pub fn mach_task_self() -> u32 {
 // --- Helper: create CFArray of CFNumbers ---
 
 pub unsafe fn cfarray_of_cfnumbers(values: *const c_void, size: usize, count: i32, num_type: i32) -> CFArrayRef {
-    let mut temp: Vec<CFNumberRef> = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let ptr = (values as *const u8).add(size * i as usize) as *const c_void;
-        temp.push(CFNumberCreate(std::ptr::null(), num_type, ptr));
+    unsafe {
+        let mut temp: Vec<CFNumberRef> = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let ptr = (values as *const u8).add(size * i as usize) as *const c_void;
+            temp.push(CFNumberCreate(std::ptr::null(), num_type, ptr));
+        }
+        let array = CFArrayCreate(
+            std::ptr::null(),
+            temp.as_ptr() as *const CFTypeRef,
+            count as i64,
+            &kCFTypeArrayCallBacks as *const _ as *const c_void,
+        );
+        for n in &temp {
+            CFRelease(*n);
+        }
+        array
     }
-    let array = CFArrayCreate(
-        std::ptr::null(),
-        temp.as_ptr() as *const CFTypeRef,
-        count as i64,
-        &kCFTypeArrayCallBacks as *const _ as *const c_void,
-    );
-    for n in &temp {
-        CFRelease(*n);
-    }
-    array
 }

@@ -23,6 +23,10 @@ pub struct BorderWindow {
     hidpi: bool,
 }
 
+// SAFETY: BorderWindow is only accessed from a single thread (the event loop thread).
+// The raw pointer (context) is a CGContextRef that we create and destroy ourselves.
+unsafe impl Send for BorderWindow {}
+
 impl BorderWindow {
     /// Create a new border overlay for `target_wid`.
     pub fn new(cid: CGSConnectionID, target_wid: u32, hidpi: bool) -> Option<Self> {

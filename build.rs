@@ -1,8 +1,7 @@
 fn main() {
-    // Link SkyLight private framework for WindowServer access
+    // SkyLight is a private framework — need to add its search path
+    println!("cargo:rustc-link-search=framework=/System/Library/PrivateFrameworks");
     println!("cargo:rustc-link-lib=framework=SkyLight");
-    // Link CoreGraphics for drawing
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
-    // Link CoreFoundation for CFRunLoop
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
 }

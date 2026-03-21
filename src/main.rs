@@ -162,10 +162,12 @@ unsafe extern "C" fn event_port_callback(
     _size: i64,
     _context: *mut std::ffi::c_void,
 ) {
-    let cid = SLSMainConnectionID();
-    let mut event = SLEventCreateNextEvent(cid);
-    while !event.is_null() {
-        CFRelease(event as CFTypeRef);
-        event = SLEventCreateNextEvent(cid);
+    unsafe {
+        let cid = SLSMainConnectionID();
+        let mut event = SLEventCreateNextEvent(cid);
+        while !event.is_null() {
+            CFRelease(event as CFTypeRef);
+            event = SLEventCreateNextEvent(cid);
+        }
     }
 }
