@@ -36,11 +36,19 @@ impl BorderMap {
         }
     }
 
-    /// Add border (event-driven, no tags — tags poison subsequent SLSNewWindow).
+    /// Add border using a fresh SLS connection (required after tags poison main cid).
     fn add_single(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
-        if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
+        let fresh_cid = unsafe {
+            let mut c: CGSConnectionID = 0;
+            SLSNewConnection(0, &mut c);
+            c
+        };
+        if fresh_cid == 0 { return; }
+        if let Some((_, overlay_wid)) = create_overlay(fresh_cid, target_wid, self.border_width) {
             self.overlays.insert(target_wid, overlay_wid);
+        } else {
+            unsafe { SLSReleaseConnection(fresh_cid); }
         }
     }
 
