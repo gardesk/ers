@@ -216,7 +216,7 @@ fn main() {
                 Err(_) => break,
             };
 
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(150));
 
             let mut events = vec![first];
             while let Ok(e) = rx.try_recv() {
