@@ -200,30 +200,28 @@ fn main() {
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
-    // Process events on background thread with resize coalescing
+    // Process events on background thread with coalescing
     std::thread::spawn(move || {
         use std::collections::HashSet;
 
+        // Persist across batches: windows we know about but haven't bordered yet
+        let mut pending: HashSet<u32> = HashSet::new();
+
         loop {
-            // Block for next event
             let first = match rx.recv() {
                 Ok(e) => e,
                 Err(_) => break,
             };
 
-            // Wait briefly for more events to arrive (debounce)
             std::thread::sleep(std::time::Duration::from_millis(50));
 
-            // Drain all queued events
             let mut events = vec![first];
             while let Ok(e) = rx.try_recv() {
                 events.push(e);
             }
 
-            // Deduplicate: track which wids need move vs resize
             let mut moved: HashSet<u32> = HashSet::new();
             let mut resized: HashSet<u32> = HashSet::new();
-            let mut created: HashSet<u32> = HashSet::new();
             let mut destroyed: HashSet<u32> = HashSet::new();
 
             for event in events {
@@ -241,15 +239,12 @@ fn main() {
                     Event::Close(wid) | Event::Destroy(wid) => {
                         if !borders.is_overlay(wid) {
                             destroyed.insert(wid);
-                            created.remove(&wid);
-                            moved.remove(&wid);
-                            resized.remove(&wid);
+                            pending.remove(&wid);
                         }
                     }
                     Event::Create(wid) => {
                         if !borders.is_overlay(wid) {
-                            created.insert(wid);
-                            // Subscribe immediately so we get Move/Resize for it
+                            pending.insert(wid);
                             borders.subscribe_target(wid);
                         }
                     }
@@ -259,31 +254,33 @@ fn main() {
                 }
             }
 
-            // Process destroys first
+            // Destroys
             for wid in &destroyed {
                 borders.remove(*wid);
             }
 
-            // Process moves (just reposition, fast)
+            // Moves (reposition existing borders)
             for wid in &moved {
                 if !resized.contains(wid) && borders.overlays.contains_key(wid) {
                     borders.reposition(*wid);
                 }
             }
 
-            // Process resizes (recreate, slow — but coalesced)
+            // Resizes (recreate existing borders)
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
                 }
             }
 
-            // Process creates: only add if NOT destroyed in same batch
-            // and if the window has been moved/resized (tarmac positioned it)
-            for wid in &created {
-                if !destroyed.contains(wid) && (moved.contains(wid) || resized.contains(wid)) {
-                    borders.add_fresh(*wid);
-                }
+            // Pending creates: promote if we saw a move/resize (tarmac positioned it)
+            let ready: Vec<u32> = pending.iter()
+                .filter(|wid| (moved.contains(wid) || resized.contains(wid)) && !destroyed.contains(wid))
+                .copied()
+                .collect();
+            for wid in ready {
+                pending.remove(&wid);
+                borders.add_fresh(wid);
             }
         }
     });
