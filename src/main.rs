@@ -50,11 +50,12 @@ fn main() {
         }
         eprintln!("{} borders created", overlay_wids.len());
 
-        // Apply click-through AFTER all overlays are created
+        // Apply click-through + shadow AFTER all overlays are created
         unsafe {
             let tags: u64 = 1 << 1;
             for &wid in &overlay_wids {
                 SLSSetWindowTags(cid, wid, &tags, 64);
+                disable_shadow(wid);
             }
         }
     }
