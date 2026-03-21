@@ -353,6 +353,30 @@ unsafe extern "C" {
 
 // --- CoreGraphics drawing ---
 
+// --- CGWindowList (public CoreGraphics API) ---
+
+pub const kCGWindowListOptionOnScreenOnly: u32 = 1 << 0;
+pub const kCGWindowListOptionAll: u32 = 0;
+pub const kCGNullWindowID: u32 = 0;
+
+unsafe extern "C" {
+    pub fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFArrayRef;
+    pub fn CFDictionaryGetValueIfPresent(
+        dict: CFDictionaryRef,
+        key: CFTypeRef,
+        value_out: *mut CFTypeRef,
+    ) -> bool;
+    pub fn CFStringCreateWithCString(
+        alloc: CFAllocatorRef,
+        c_str: *const u8,
+        encoding: u32,
+    ) -> CFStringRef;
+}
+
+pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
+
+// --- CoreGraphics drawing ---
+
 unsafe extern "C" {
     pub fn CGContextSetRGBStrokeColor(
         ctx: CGContextRef,
