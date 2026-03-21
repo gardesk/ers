@@ -102,6 +102,13 @@ fn create_overlay(
         SLSSetWindowLevel(bcid, wid, 1); // above normal
         SLSOrderWindow(bcid, wid, 1, 0); // order in
 
+        // Click-through + sticky (visible on all spaces)
+        let tags: u64 = (1 << 1) | (1 << 9);
+        SLSSetWindowTags(bcid, wid, &tags, 64);
+
+        // Disable shadow
+        disable_shadow(wid);
+
         // Draw border: 4 filled rectangles (no clipping tricks)
         let ctx = SLWindowContextCreate(bcid, wid, ptr::null());
         if ctx.is_null() {
@@ -180,4 +187,32 @@ fn list_windows() {
         CFRelease(name_key as CFTypeRef);
         CFRelease(list);
     }
+}
+
+unsafe fn disable_shadow(wid: u32) {
+    let density: i64 = 0;
+    let density_cf = CFNumberCreate(
+        ptr::null(),
+        kCFNumberCFIndexType,
+        &density as *const _ as *const _,
+    );
+    let key = CFStringCreateWithCString(
+        ptr::null(),
+        b"com.apple.WindowShadowDensity\0".as_ptr(),
+        kCFStringEncodingUTF8,
+    );
+    let keys = [key as CFTypeRef];
+    let values = [density_cf as CFTypeRef];
+    let dict = CFDictionaryCreate(
+        ptr::null(),
+        keys.as_ptr(),
+        values.as_ptr(),
+        1,
+        &kCFTypeDictionaryKeyCallBacks as *const _ as *const _,
+        &kCFTypeDictionaryValueCallBacks as *const _ as *const _,
+    );
+    SLSWindowSetShadowProperties(wid, dict);
+    CFRelease(dict);
+    CFRelease(density_cf);
+    CFRelease(key as CFTypeRef);
 }
