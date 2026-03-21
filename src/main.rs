@@ -9,103 +9,129 @@ use std::collections::HashMap;
 use std::ptr;
 use std::sync::mpsc;
 
-/// Tracks overlay wid for each target wid.
-struct BorderMap {
-    /// target_wid → overlay_wid
-    overlays: HashMap<u32, u32>,
+/// Per-overlay state: the connection it was created on + its wid.
+struct Overlay {
     cid: CGSConnectionID,
+    wid: u32,
+}
+
+/// Tracks overlays for target windows.
+struct BorderMap {
+    /// target_wid → Overlay
+    overlays: HashMap<u32, Overlay>,
+    main_cid: CGSConnectionID,
     own_pid: i32,
     border_width: f64,
 }
 
 impl BorderMap {
     fn new(cid: CGSConnectionID, own_pid: i32, border_width: f64) -> Self {
-        Self { overlays: HashMap::new(), cid, own_pid, border_width }
+        Self { overlays: HashMap::new(), main_cid: cid, own_pid, border_width }
     }
 
-    /// Check if a wid is one of our overlay windows (not a target).
     fn is_overlay(&self, wid: u32) -> bool {
-        self.overlays.values().any(|&v| v == wid)
+        self.overlays.values().any(|o| o.wid == wid)
     }
 
-    /// Add border without tags (for batch creation).
-    fn add(&mut self, target_wid: u32) {
+    /// Add border (batch mode, uses main cid).
+    fn add_batch(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
-        if let Some((_, overlay_wid)) = create_overlay(self.cid, target_wid, self.border_width) {
-            self.overlays.insert(target_wid, overlay_wid);
+        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width) {
+            self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
 
-    /// Add border using a fresh SLS connection (required after tags poison main cid).
-    fn add_single(&mut self, target_wid: u32) {
+    /// Add border (event mode, fresh connection since tags poisoned main cid).
+    fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
-        let fresh_cid = unsafe {
+        let fresh = unsafe {
             let mut c: CGSConnectionID = 0;
             SLSNewConnection(0, &mut c);
             c
         };
-        if fresh_cid == 0 { return; }
-        if let Some((_, overlay_wid)) = create_overlay(fresh_cid, target_wid, self.border_width) {
-            self.overlays.insert(target_wid, overlay_wid);
+        if fresh == 0 { return; }
+        if let Some((cid, wid)) = create_overlay(fresh, target_wid, self.border_width) {
+            self.overlays.insert(target_wid, Overlay { cid, wid });
         } else {
-            unsafe { SLSReleaseConnection(fresh_cid); }
+            unsafe { SLSReleaseConnection(fresh); }
         }
     }
 
     fn remove(&mut self, target_wid: u32) {
-        if let Some(overlay_wid) = self.overlays.remove(&target_wid) {
-            unsafe { SLSReleaseWindow(self.cid, overlay_wid); }
+        if let Some(overlay) = self.overlays.remove(&target_wid) {
+            unsafe {
+                SLSReleaseWindow(overlay.cid, overlay.wid);
+                // Don't release main_cid connections
+                if overlay.cid != self.main_cid {
+                    SLSReleaseConnection(overlay.cid);
+                }
+            }
         }
     }
 
-    /// Recreate overlay at new position/size (move or resize).
+    /// Move overlay to match target's current position (no recreate).
+    fn reposition(&self, target_wid: u32) {
+        if let Some(overlay) = self.overlays.get(&target_wid) {
+            unsafe {
+                let mut bounds = CGRect::default();
+                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                    return;
+                }
+                let bw = self.border_width;
+                let origin = CGPoint {
+                    x: bounds.origin.x - bw,
+                    y: bounds.origin.y - bw,
+                };
+                SLSMoveWindow(overlay.cid, overlay.wid, &origin);
+            }
+        }
+    }
+
+    /// Recreate overlay at new size. Uses fresh connection.
     fn recreate(&mut self, target_wid: u32) {
         if !self.overlays.contains_key(&target_wid) { return; }
         self.remove(target_wid);
-        self.add_single(target_wid);
+        self.add_fresh(target_wid);
         self.subscribe_target(target_wid);
     }
 
     fn hide(&self, target_wid: u32) {
-        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
-            unsafe { SLSOrderWindow(self.cid, overlay_wid, 0, 0); }
+        if let Some(o) = self.overlays.get(&target_wid) {
+            unsafe { SLSOrderWindow(o.cid, o.wid, 0, 0); }
         }
     }
 
     fn unhide(&self, target_wid: u32) {
-        if let Some(&overlay_wid) = self.overlays.get(&target_wid) {
+        if let Some(o) = self.overlays.get(&target_wid) {
             unsafe {
-                SLSSetWindowLevel(self.cid, overlay_wid, 25);
-                SLSOrderWindow(self.cid, overlay_wid, 1, 0);
+                SLSSetWindowLevel(o.cid, o.wid, 25);
+                SLSOrderWindow(o.cid, o.wid, 1, 0);
             }
         }
     }
 
-    /// Apply tags to ALL overlays (only safe during initial batch creation).
     fn apply_tags_all(&self) {
         unsafe {
             let tags: u64 = 1 << 1;
-            for &overlay_wid in self.overlays.values() {
-                SLSSetWindowTags(self.cid, overlay_wid, &tags, 64);
-                disable_shadow(overlay_wid);
+            for o in self.overlays.values() {
+                SLSSetWindowTags(o.cid, o.wid, &tags, 64);
+                disable_shadow(o.wid);
             }
         }
     }
 
-    /// Subscribe for events on a single target.
     fn subscribe_target(&self, target_wid: u32) {
         unsafe {
-            SLSRequestNotificationsForWindows(self.cid, &target_wid, 1);
+            SLSRequestNotificationsForWindows(self.main_cid, &target_wid, 1);
         }
     }
 
-    /// Subscribe for per-window move/resize events on all tracked targets.
     fn subscribe_all(&self) {
         let target_wids: Vec<u32> = self.overlays.keys().copied().collect();
         if target_wids.is_empty() { return; }
         unsafe {
             SLSRequestNotificationsForWindows(
-                self.cid,
+                self.main_cid,
                 target_wids.as_ptr(),
                 target_wids.len() as i32,
             );
@@ -144,43 +170,85 @@ fn main() {
     let mut borders = BorderMap::new(cid, own_pid, border_width);
 
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
-        borders.add(target);
+        borders.add_batch(target);
     } else {
         let wids = discover_windows(cid, own_pid);
         eprintln!("{} windows discovered", wids.len());
         for &wid in &wids {
-            borders.add(wid);
+            borders.add_batch(wid);
         }
         eprintln!("{} borders created", borders.overlays.len());
     }
 
-    // Apply tags (batch safe) and subscribe for per-window events
-    borders.apply_tags_all();
+    // Subscribe for per-window events (NO tags — they poison SLSNewWindow globally)
     borders.subscribe_all();
 
-    // Process events on background thread
+    eprintln!("{} overlays tracked", borders.overlays.len());
+
+    // Process events on background thread with resize coalescing
     std::thread::spawn(move || {
-        while let Ok(event) = rx.recv() {
-            match event {
-                Event::Move(wid) | Event::Resize(wid) => {
-                    if !borders.is_overlay(wid) {
-                        borders.recreate(wid);
+        use std::collections::HashSet;
+
+        loop {
+            // Block for next event
+            let first = match rx.recv() {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+
+            // Drain all queued events (coalesce burst)
+            let mut events = vec![first];
+            while let Ok(e) = rx.try_recv() {
+                events.push(e);
+            }
+
+            // Deduplicate: track which wids need move vs resize
+            let mut moved: HashSet<u32> = HashSet::new();
+            let mut resized: HashSet<u32> = HashSet::new();
+
+            for event in events {
+                match event {
+                    Event::Move(wid) => {
+                        if !borders.is_overlay(wid) {
+                            moved.insert(wid);
+                        }
                     }
-                }
-                Event::Close(wid) | Event::Destroy(wid) => {
-                    if !borders.is_overlay(wid) {
-                        borders.remove(wid);
+                    Event::Resize(wid) => {
+                        if !borders.is_overlay(wid) {
+                            resized.insert(wid);
+                        }
                     }
-                }
-                Event::Create(wid) => {
-                    if !borders.is_overlay(wid) {
-                        borders.add_single(wid);
-                        borders.subscribe_target(wid);
+                    Event::Close(wid) | Event::Destroy(wid) => {
+                        if !borders.is_overlay(wid) {
+                            borders.remove(wid);
+                            moved.remove(&wid);
+                            resized.remove(&wid);
+                        }
                     }
+                    Event::Create(wid) => {
+                        if !borders.is_overlay(wid) {
+                            borders.add_fresh(wid);
+                            borders.subscribe_target(wid);
+                        }
+                    }
+                    Event::Hide(wid) => borders.hide(wid),
+                    Event::Unhide(wid) => borders.unhide(wid),
+                    Event::SpaceChange | Event::FrontChange => {}
                 }
-                Event::Hide(wid) => borders.hide(wid),
-                Event::Unhide(wid) => borders.unhide(wid),
-                Event::SpaceChange | Event::FrontChange => {}
+            }
+
+            // Process moves (just reposition, fast)
+            for wid in &moved {
+                if !resized.contains(wid) && borders.overlays.contains_key(wid) {
+                    borders.reposition(*wid);
+                }
+            }
+
+            // Process resizes (recreate, slow — but coalesced)
+            for wid in &resized {
+                if borders.overlays.contains_key(wid) {
+                    borders.recreate(*wid);
+                }
             }
         }
     });
