@@ -18,10 +18,11 @@ use windows::WindowTracker;
 use std::sync::mpsc;
 
 fn main() {
+    eprintln!("[ers] pid={}", std::process::id());
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("ers=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ers=info".parse().unwrap()),
         )
         .init();
 
