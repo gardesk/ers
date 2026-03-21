@@ -306,12 +306,12 @@ fn main() {
                 }
             }
 
+            let mut needs_resubscribe = false;
             for &wid in &ready {
                 pending.remove(&wid);
                 if !skip.contains(&wid) {
                     borders.add_fresh(wid);
-                    // Re-subscribe so we get future move/resize events
-                    borders.subscribe_target(wid);
+                    needs_resubscribe = true;
                 }
             }
 
@@ -326,8 +326,13 @@ fn main() {
             for wid in &resized {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
-                    borders.subscribe_target(*wid);
+                    needs_resubscribe = true;
                 }
+            }
+
+            // Re-subscribe ALL tracked windows (SLSRequestNotificationsForWindows replaces, not appends)
+            if needs_resubscribe || !destroyed.is_empty() {
+                borders.subscribe_all();
             }
         }
     });
