@@ -282,24 +282,26 @@ fn main() {
                 }
             }
 
+            // If two new windows overlap closely, skip the larger one (container)
             let mut skip: std::collections::HashSet<u32> = HashSet::new();
             for i in 0..bounds_map.len() {
                 for j in (i+1)..bounds_map.len() {
                     let (wid_a, a) = &bounds_map[i];
                     let (wid_b, b) = &bounds_map[j];
-                    // Check if one contains the other (within 20px margin)
-                    let a_contains_b = a.origin.x <= b.origin.x + 20.0
-                        && a.origin.y <= b.origin.y + 20.0
-                        && a.origin.x + a.size.width >= b.origin.x + b.size.width - 20.0
-                        && a.origin.y + a.size.height >= b.origin.y + b.size.height - 20.0;
-                    let b_contains_a = b.origin.x <= a.origin.x + 20.0
-                        && b.origin.y <= a.origin.y + 20.0
-                        && b.origin.x + b.size.width >= a.origin.x + a.size.width - 20.0
-                        && b.origin.y + b.size.height >= a.origin.y + a.size.height - 20.0;
-                    if a_contains_b {
-                        skip.insert(*wid_a); // skip the larger
-                    } else if b_contains_a {
-                        skip.insert(*wid_b);
+                    // Check if centers are close (within 30px)
+                    let cx_a = a.origin.x + a.size.width / 2.0;
+                    let cy_a = a.origin.y + a.size.height / 2.0;
+                    let cx_b = b.origin.x + b.size.width / 2.0;
+                    let cy_b = b.origin.y + b.size.height / 2.0;
+                    if (cx_a - cx_b).abs() < 30.0 && (cy_a - cy_b).abs() < 30.0 {
+                        // Skip the larger one
+                        let area_a = a.size.width * a.size.height;
+                        let area_b = b.size.width * b.size.height;
+                        if area_a > area_b {
+                            skip.insert(*wid_a);
+                        } else {
+                            skip.insert(*wid_b);
+                        }
                     }
                 }
             }
