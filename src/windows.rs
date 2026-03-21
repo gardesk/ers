@@ -22,6 +22,7 @@ pub struct WindowTracker {
     focused_wid: u32,
     cid: CGSConnectionID,
     own_pid: i32,
+    discovered: Vec<u32>,
 }
 
 impl WindowTracker {
@@ -34,8 +35,12 @@ impl WindowTracker {
             focused_wid: 0,
             cid,
             own_pid: pid,
+            discovered: Vec::new(),
         }
     }
+
+    pub fn cid(&self) -> CGSConnectionID { self.cid }
+    pub fn border_count(&self) -> usize { self.borders.len() }
 
     /// Check if a window iterator entry represents a "suitable" application window.
     fn window_suitable(iterator: CFTypeRef) -> bool {
@@ -62,178 +67,100 @@ impl WindowTracker {
         }
     }
 
-    /// Discover and add borders for all existing windows on all spaces.
+    /// Discover and add borders for all on-screen windows.
+    /// Uses CGWindowListCopyWindowInfo (public CG API) instead of
+    /// SLSCopyManagedDisplaySpaces which poisons subsequent SLSNewWindow calls.
     pub fn add_existing_windows(&mut self, config: &Config) {
-        let cid = self.cid;
-
-        // Get all spaces across all displays
-        let mut all_sids: Vec<u64> = Vec::new();
-        unsafe {
-            let display_spaces = SLSCopyManagedDisplaySpaces(cid);
-            if !display_spaces.is_null() {
-                let display_count = CFArrayGetCount(display_spaces);
-                for i in 0..display_count {
-                    let display_ref = CFArrayGetValueAtIndex(display_spaces, i);
-                    if display_ref.is_null() { continue; }
-                    // Get "Spaces" key from display dict
-                    let spaces_key_bytes = b"Spaces\0";
-                    let spaces_key =
-                        CFStringCreateWithCString(std::ptr::null(), spaces_key_bytes.as_ptr(), 0x0800_0100);
-                    if spaces_key.is_null() { continue; }
-                    let spaces_ref = CFDictionaryGetValue(display_ref, spaces_key as CFTypeRef);
-                    CFRelease(spaces_key as CFTypeRef);
-
-                    if !spaces_ref.is_null() {
-                        let spaces_count = CFArrayGetCount(spaces_ref);
-                        for j in 0..spaces_count {
-                            let space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
-                            if space_ref.is_null() { continue; }
-                            let id_key_bytes = b"id64\0";
-                            let id_key = CFStringCreateWithCString(
-                                std::ptr::null(),
-                                id_key_bytes.as_ptr(),
-                                0x0800_0100,
-                            );
-                            if id_key.is_null() { continue; }
-                            let sid_ref = CFDictionaryGetValue(space_ref, id_key as CFTypeRef);
-                            CFRelease(id_key as CFTypeRef);
-
-                            if !sid_ref.is_null() {
-                                let mut sid: u64 = 0;
-                                let num_type = CFNumberGetType(sid_ref);
-                                CFNumberGetValue(
-                                    sid_ref,
-                                    num_type,
-                                    &mut sid as *mut _ as *mut _,
-                                );
-                                all_sids.push(sid);
-                            }
-                        }
-                    }
-                }
-                CFRelease(display_spaces);
+        let discovered_wids: Vec<u32> = unsafe {
+            let window_list = CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
+            );
+            if window_list.is_null() {
+                eprintln!("[discover] CGWindowListCopyWindowInfo returned null");
+                return;
             }
-        }
 
-        tracing::info!(spaces = all_sids.len(), "discovered space IDs");
+            let count = CFArrayGetCount(window_list);
+            eprintln!("[discover] {count} on-screen windows from CGWindowList");
 
-        if all_sids.is_empty() {
-            tracing::warn!("no spaces found — cannot discover windows");
-            return;
-        }
-
-        // Get all windows on those spaces
-        unsafe {
-            let space_list = cfarray_of_cfnumbers(
-                all_sids.as_ptr() as *const _,
-                std::mem::size_of::<u64>(),
-                all_sids.len() as i32,
-                kCFNumberSInt64Type,
+            let wid_key = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"kCGWindowNumber\0".as_ptr(),
+                kCFStringEncodingUTF8,
+            );
+            let pid_key = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"kCGWindowOwnerPID\0".as_ptr(),
+                kCFStringEncodingUTF8,
+            );
+            let layer_key = CFStringCreateWithCString(
+                std::ptr::null(),
+                b"kCGWindowLayer\0".as_ptr(),
+                kCFStringEncodingUTF8,
             );
 
-            let set_tags: u64 = 1;
-            let clear_tags: u64 = 0;
-            let window_list = SLSCopyWindowsWithOptionsAndTags(
-                cid, 0, space_list, 0x2, &set_tags, &clear_tags,
-            );
+            let mut wids: Vec<u32> = Vec::new();
 
-            if !window_list.is_null() {
-                let count = CFArrayGetCount(window_list);
-                tracing::info!(count, "candidate windows from SLS");
-                if count > 0 {
-                    let query = SLSWindowQueryWindows(cid, window_list, 0x0);
-                    if !query.is_null() {
-                        let iterator = SLSWindowQueryResultCopyWindows(query);
-                        if !iterator.is_null() {
-                            let mut total = 0;
-                            let mut suitable = 0;
-                            while SLSWindowIteratorAdvance(iterator) {
-                                total += 1;
-                                let tags = SLSWindowIteratorGetTags(iterator);
-                                let attrs = SLSWindowIteratorGetAttributes(iterator);
-                                let parent = SLSWindowIteratorGetParentID(iterator);
-                                let wid = SLSWindowIteratorGetWindowID(iterator);
-                                if Self::window_suitable(iterator) {
-                                    suitable += 1;
-                                    if !self.is_own_window(wid) {
-                                        tracing::debug!(wid, tags, attrs, parent, "suitable window");
-                                        self.create_border(wid, config);
-                                    }
-                                }
-                            }
-                            tracing::info!(total, suitable, tracked = self.borders.len(), "window discovery complete");
-                            CFRelease(iterator);
-                        }
-                        CFRelease(query);
-                    }
+            for i in 0..count {
+                let dict = CFArrayGetValueAtIndex(window_list, i);
+                if dict.is_null() { continue; }
+
+                // Get window ID
+                let mut wid_ref: CFTypeRef = std::ptr::null();
+                if !CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut wid_ref) {
+                    continue;
                 }
-                CFRelease(window_list);
-            }
-            CFRelease(space_list);
-        }
+                let mut wid: u32 = 0;
+                CFNumberGetValue(wid_ref, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+                if wid == 0 { continue; }
 
-        self.update_notifications();
-    }
-
-    /// Create a border for a window if it passes suitability checks.
-    pub fn create_border(&mut self, wid: u32, config: &Config) -> bool {
-        if self.borders.contains_key(&wid) || self.is_own_window(wid) {
-            return false;
-        }
-
-        // Check suitability via query
-        let suitable = unsafe {
-            let target_ref = cfarray_of_cfnumbers(
-                &wid as *const _ as *const _,
-                std::mem::size_of::<u32>(),
-                1,
-                kCFNumberSInt32Type,
-            );
-            let mut result = false;
-            if !target_ref.is_null() {
-                let query = SLSWindowQueryWindows(self.cid, target_ref, 0x0);
-                if !query.is_null() {
-                    let iter = SLSWindowQueryResultCopyWindows(query);
-                    if !iter.is_null() {
-                        if SLSWindowIteratorGetCount(iter) > 0 && SLSWindowIteratorAdvance(iter) {
-                            result = Self::window_suitable(iter);
-                        }
-                        CFRelease(iter);
-                    }
-                    CFRelease(query);
+                // Get owner PID
+                let mut pid_ref: CFTypeRef = std::ptr::null();
+                if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut pid_ref) {
+                    let mut pid: i32 = 0;
+                    CFNumberGetValue(pid_ref, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
+                    if pid == self.own_pid { continue; } // skip our own windows
                 }
-                CFRelease(target_ref);
+
+                // Get window layer (skip layer != 0, those are system UI)
+                let mut layer_ref: CFTypeRef = std::ptr::null();
+                if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut layer_ref) {
+                    let mut layer: i32 = 0;
+                    CFNumberGetValue(layer_ref, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
+                    if layer != 0 { continue; }
+                }
+
+                wids.push(wid);
             }
-            result
+
+            CFRelease(wid_key as CFTypeRef);
+            CFRelease(pid_key as CFTypeRef);
+            CFRelease(layer_key as CFTypeRef);
+            CFRelease(window_list);
+            wids
         };
 
-        if !suitable {
-            return false;
-        }
+        eprintln!("[discover] {} suitable windows, creating borders", discovered_wids.len());
 
-        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
-            tracing::info!(
-                wid,
-                overlay_wid = border.wid,
-                x = border.target_bounds.origin.x,
-                y = border.target_bounds.origin.y,
-                w = border.target_bounds.size.width,
-                h = border.target_bounds.size.height,
-                "created border"
-            );
-            // DISABLED: testing if new() alone produces visible overlays
-            // border.update(
-            //     &config.active_color,
-            //     &config.inactive_color,
-            //     config.border_width,
-            //     config.radius,
-            //     config.border_order,
-            // );
+        for &wid in &discovered_wids {
+            self.create_border(wid, config);
+        }
+    }
+
+    /// Get discovered window IDs (for debugging).
+    pub fn take_discovered(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.discovered)
+    }
+
+    /// Create a border for a window.
+    pub fn create_border(&mut self, wid: u32, config: &Config) -> bool {
+        // DEBUG: stripped to absolute minimum — just new() + insert
+        if let Some(border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
+            eprintln!("[create_border] wid={wid} overlay={} — inserted", border.wid);
             self.borders.insert(wid, border);
-            self.update_notifications();
             true
         } else {
-            tracing::warn!(wid, "BorderWindow::new returned None");
             false
         }
     }
@@ -344,13 +271,8 @@ impl WindowTracker {
 
     /// Register for per-window notifications.
     fn update_notifications(&self) {
-        let wids: Vec<u32> = self.borders.keys().copied().collect();
-        if wids.is_empty() {
-            return;
-        }
-        unsafe {
-            SLSRequestNotificationsForWindows(self.cid, wids.as_ptr(), wids.len() as i32);
-        }
+        // DISABLED: testing if SLSRequestNotificationsForWindows hides overlays
+        eprintln!("[tracker] update_notifications SKIPPED ({} windows)", self.borders.len());
     }
 
     /// Test mode: draw border on a specific window ID.
