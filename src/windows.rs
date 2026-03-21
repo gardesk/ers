@@ -115,7 +115,10 @@ impl WindowTracker {
             }
         }
 
+        tracing::info!(spaces = all_sids.len(), "discovered space IDs");
+
         if all_sids.is_empty() {
+            tracing::warn!("no spaces found — cannot discover windows");
             return;
         }
 
@@ -136,19 +139,29 @@ impl WindowTracker {
 
             if !window_list.is_null() {
                 let count = CFArrayGetCount(window_list);
+                tracing::info!(count, "candidate windows from SLS");
                 if count > 0 {
                     let query = SLSWindowQueryWindows(cid, window_list, 0x0);
                     if !query.is_null() {
                         let iterator = SLSWindowQueryResultCopyWindows(query);
                         if !iterator.is_null() {
+                            let mut total = 0;
+                            let mut suitable = 0;
                             while SLSWindowIteratorAdvance(iterator) {
+                                total += 1;
+                                let tags = SLSWindowIteratorGetTags(iterator);
+                                let attrs = SLSWindowIteratorGetAttributes(iterator);
+                                let parent = SLSWindowIteratorGetParentID(iterator);
+                                let wid = SLSWindowIteratorGetWindowID(iterator);
                                 if Self::window_suitable(iterator) {
-                                    let wid = SLSWindowIteratorGetWindowID(iterator);
+                                    suitable += 1;
                                     if !self.is_own_window(wid) {
+                                        tracing::debug!(wid, tags, attrs, parent, "suitable window");
                                         self.create_border(wid, config);
                                     }
                                 }
                             }
+                            tracing::info!(total, suitable, tracked = self.borders.len(), "window discovery complete");
                             CFRelease(iterator);
                         }
                         CFRelease(query);
@@ -198,11 +211,29 @@ impl WindowTracker {
             return false;
         }
 
-        if let Some(border) = BorderWindow::new(self.cid, wid, config.hidpi) {
+        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi) {
+            tracing::info!(
+                wid,
+                overlay_wid = border.wid,
+                x = border.target_bounds.origin.x,
+                y = border.target_bounds.origin.y,
+                w = border.target_bounds.size.width,
+                h = border.target_bounds.size.height,
+                "created border"
+            );
+            // Initial draw — overlay starts at (-9999,-9999) with 1x1 size until update()
+            border.update(
+                &config.active_color,
+                &config.inactive_color,
+                config.border_width,
+                config.radius,
+                config.border_order,
+            );
             self.borders.insert(wid, border);
             self.update_notifications();
             true
         } else {
+            tracing::warn!(wid, "BorderWindow::new returned None");
             false
         }
     }
@@ -268,6 +299,7 @@ impl WindowTracker {
     /// Determine the front window and update focus state.
     pub fn determine_focus(&mut self, config: &Config) {
         let front_wid = get_front_window(self.cid);
+        tracing::debug!(front_wid, current = self.focused_wid, "focus check");
 
         if front_wid == 0 || front_wid == self.focused_wid {
             return;
