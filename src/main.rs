@@ -10,11 +10,15 @@ use std::ptr;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
+    if args.get(1).is_some_and(|s| s == "--list") {
+        list_windows();
+        return;
+    }
+
     let target_wid: u32 = match args.get(1) {
-        Some(s) => s.parse().expect("usage: ers <window-id>"),
+        Some(s) => s.parse().expect("usage: ers <window-id> | --list"),
         None => {
-            eprintln!("usage: ers <window-id>");
-            eprintln!("  draws a border around the specified window");
+            eprintln!("usage: ers <window-id> | --list");
             std::process::exit(1);
         }
     };
@@ -98,7 +102,7 @@ fn create_overlay(
         SLSSetWindowLevel(bcid, wid, 1); // above normal
         SLSOrderWindow(bcid, wid, 1, 0); // order in
 
-        // Draw solid fill (proven to show on all 4 sides)
+        // Draw border: 4 filled rectangles (no clipping tricks)
         let ctx = SLWindowContextCreate(bcid, wid, ptr::null());
         if ctx.is_null() {
             SLSReleaseWindow(bcid, wid);
@@ -106,19 +110,76 @@ fn create_overlay(
             return None;
         }
 
-        let scale = 2.0;
-        let full = CGRect::new(0.0, 0.0, ow * scale, oh * scale);
+        // Context is in POINTS, not pixels (SLSSetWindowResolution handles HiDPI)
+        let w = ow;
+        let h = oh;
+        let b = bw;
+        let full = CGRect::new(0.0, 0.0, w, h);
         CGContextClearRect(ctx, full);
+
         CGContextSetRGBFillColor(ctx, 0.32, 0.58, 0.89, 1.0);
-        let path = CGPathCreateMutable();
-        CGPathAddRect(path, ptr::null(), full);
-        CGContextAddPath(ctx, path as CGPathRef);
-        CGContextFillPath(ctx);
-        CGPathRelease(path as CGPathRef);
+
+        // 4 border strips
+        let strips = [
+            CGRect::new(0.0, 0.0, w, b),           // bottom
+            CGRect::new(0.0, h - b, w, b),          // top
+            CGRect::new(0.0, b, b, h - 2.0 * b),    // left
+            CGRect::new(w - b, b, b, h - 2.0 * b),  // right
+        ];
+        for rect in &strips {
+            let p = CGPathCreateMutable();
+            CGPathAddRect(p, ptr::null(), *rect);
+            CGContextAddPath(ctx, p as CGPathRef);
+            CGContextFillPath(ctx);
+            CGPathRelease(p as CGPathRef);
+        }
+
         CGContextFlush(ctx);
         SLSFlushWindowContentRegion(bcid, wid, ptr::null());
         CGContextRelease(ctx);
 
         Some((bcid, wid))
+    }
+}
+
+/// List on-screen windows with positions.
+fn list_windows() {
+    let cid = unsafe { SLSMainConnectionID() };
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+        if list.is_null() { return; }
+        let count = CFArrayGetCount(list);
+        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
+        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
+        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
+        let name_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerName\0".as_ptr(), kCFStringEncodingUTF8);
+
+        eprintln!("{:>6}  {:>5}  {:>8}  {:>8}  {:>6}  {:>6}", "wid", "layer", "x", "y", "w", "h");
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(list, i);
+            if dict.is_null() { continue; }
+
+            let mut v: CFTypeRef = ptr::null();
+            let mut wid: u32 = 0;
+            let mut layer: i32 = -1;
+            if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+            }
+            if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
+            }
+            if layer != 0 || wid == 0 { continue; }
+
+            let mut bounds = CGRect::default();
+            SLSGetWindowBounds(cid, wid, &mut bounds);
+
+            eprintln!("{wid:>6}  {layer:>5}  {:>8.0}  {:>8.0}  {:>6.0}  {:>6.0}",
+                bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height);
+        }
+        CFRelease(wid_key as CFTypeRef);
+        CFRelease(pid_key as CFTypeRef);
+        CFRelease(layer_key as CFTypeRef);
+        CFRelease(name_key as CFTypeRef);
+        CFRelease(list);
     }
 }
