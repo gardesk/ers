@@ -45,17 +45,26 @@ impl BorderMap {
     fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
 
-        // Filter: must be ordered in and owned by another process
+        // Filter: must be visible, layer 0, owned by another process
         unsafe {
             let mut shown = false;
             SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
             if !shown { return; }
+
+            let mut level: i64 = -1;
+            SLSGetWindowLevel(self.main_cid, target_wid, &mut level);
+            if level != 0 { return; }
 
             let mut wid_cid: CGSConnectionID = 0;
             SLSGetWindowOwner(self.main_cid, target_wid, &mut wid_cid);
             let mut pid: i32 = 0;
             SLSConnectionGetPID(wid_cid, &mut pid);
             if pid == self.own_pid { return; }
+
+            // Skip tiny windows
+            let mut bounds = CGRect::default();
+            SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
+            if bounds.size.width < 50.0 || bounds.size.height < 50.0 { return; }
         }
 
         let fresh = unsafe {
