@@ -272,9 +272,43 @@ fn main() {
                 .filter(|wid| !destroyed.contains(wid))
                 .copied()
                 .collect();
-            for wid in &ready {
-                pending.remove(wid);
-                borders.add_fresh(*wid);
+            // Filter overlapping creates: if two windows overlap, keep smaller one
+            let mut bounds_map: Vec<(u32, CGRect)> = Vec::new();
+            for &wid in &ready {
+                unsafe {
+                    let mut b = CGRect::default();
+                    SLSGetWindowBounds(borders.main_cid, wid, &mut b);
+                    bounds_map.push((wid, b));
+                }
+            }
+
+            let mut skip: std::collections::HashSet<u32> = HashSet::new();
+            for i in 0..bounds_map.len() {
+                for j in (i+1)..bounds_map.len() {
+                    let (wid_a, a) = &bounds_map[i];
+                    let (wid_b, b) = &bounds_map[j];
+                    // Check if one contains the other (within 20px margin)
+                    let a_contains_b = a.origin.x <= b.origin.x + 20.0
+                        && a.origin.y <= b.origin.y + 20.0
+                        && a.origin.x + a.size.width >= b.origin.x + b.size.width - 20.0
+                        && a.origin.y + a.size.height >= b.origin.y + b.size.height - 20.0;
+                    let b_contains_a = b.origin.x <= a.origin.x + 20.0
+                        && b.origin.y <= a.origin.y + 20.0
+                        && b.origin.x + b.size.width >= a.origin.x + a.size.width - 20.0
+                        && b.origin.y + b.size.height >= a.origin.y + a.size.height - 20.0;
+                    if a_contains_b {
+                        skip.insert(*wid_a); // skip the larger
+                    } else if b_contains_a {
+                        skip.insert(*wid_b);
+                    }
+                }
+            }
+
+            for &wid in &ready {
+                pending.remove(&wid);
+                if !skip.contains(&wid) {
+                    borders.add_fresh(wid);
+                }
             }
 
             // Moves (reposition existing borders)
