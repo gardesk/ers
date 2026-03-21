@@ -74,7 +74,8 @@ impl BorderMap {
     fn remove(&mut self, target_wid: u32) {
         if let Some(overlay) = self.overlays.remove(&target_wid) {
             unsafe {
-                // Order out first — SLSReleaseWindow alone doesn't hide on Tahoe
+                // Triple-ensure visual cleanup on Tahoe
+                SLSSetWindowAlpha(overlay.cid, overlay.wid, 0.0);
                 SLSOrderWindow(overlay.cid, overlay.wid, 0, 0);
                 SLSReleaseWindow(overlay.cid, overlay.wid);
                 if overlay.cid != self.main_cid {
