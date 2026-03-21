@@ -22,7 +22,6 @@ pub struct WindowTracker {
     focused_wid: u32,
     cid: CGSConnectionID,
     own_pid: i32,
-    discovered: Vec<u32>,
 }
 
 impl WindowTracker {
@@ -35,11 +34,9 @@ impl WindowTracker {
             focused_wid: 0,
             cid,
             own_pid: pid,
-            discovered: Vec::new(),
         }
     }
 
-    pub fn cid(&self) -> CGSConnectionID { self.cid }
     pub fn border_count(&self) -> usize { self.borders.len() }
 
     /// Check if a window iterator entry represents a "suitable" application window.
@@ -141,24 +138,29 @@ impl WindowTracker {
             wids
         };
 
-        eprintln!("[discover] {} suitable windows, creating borders", discovered_wids.len());
+        tracing::info!(count = discovered_wids.len(), "discovered windows");
 
         for &wid in &discovered_wids {
             self.create_border(wid, config);
         }
     }
 
-    /// Get discovered window IDs (for debugging).
-    pub fn take_discovered(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.discovered)
-    }
-
     /// Create a border for a window.
     pub fn create_border(&mut self, wid: u32, config: &Config) -> bool {
-        // DEBUG: stripped to absolute minimum — just new() + insert
-        if let Some(border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
-            eprintln!("[create_border] wid={wid} overlay={} — inserted", border.wid);
+        if self.borders.contains_key(&wid) {
+            return false;
+        }
+
+        if let Some(mut border) = BorderWindow::new(self.cid, wid, config.hidpi, config.border_width) {
+            border.update(
+                &config.active_color,
+                &config.inactive_color,
+                config.border_width,
+                config.radius,
+                config.border_order,
+            );
             self.borders.insert(wid, border);
+            self.update_notifications();
             true
         } else {
             false
@@ -271,8 +273,13 @@ impl WindowTracker {
 
     /// Register for per-window notifications.
     fn update_notifications(&self) {
-        // DISABLED: testing if SLSRequestNotificationsForWindows hides overlays
-        eprintln!("[tracker] update_notifications SKIPPED ({} windows)", self.borders.len());
+        let wids: Vec<u32> = self.borders.keys().copied().collect();
+        if wids.is_empty() {
+            return;
+        }
+        unsafe {
+            SLSRequestNotificationsForWindows(self.cid, wids.as_ptr(), wids.len() as i32);
+        }
     }
 
     /// Test mode: draw border on a specific window ID.
