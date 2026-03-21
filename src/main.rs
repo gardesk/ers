@@ -17,16 +17,30 @@ struct Overlay {
 
 /// Tracks overlays for target windows.
 struct BorderMap {
-    /// target_wid → Overlay
     overlays: HashMap<u32, Overlay>,
     main_cid: CGSConnectionID,
     own_pid: i32,
     border_width: f64,
+    focused_wid: u32,
+    active_color: (f64, f64, f64, f64),
+    inactive_color: (f64, f64, f64, f64),
 }
 
 impl BorderMap {
     fn new(cid: CGSConnectionID, own_pid: i32, border_width: f64) -> Self {
-        Self { overlays: HashMap::new(), main_cid: cid, own_pid, border_width }
+        Self {
+            overlays: HashMap::new(),
+            main_cid: cid,
+            own_pid,
+            border_width,
+            focused_wid: 0,
+            active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
+            inactive_color: (0.18, 0.18, 0.18, 0.5),  // #2d2d2d80
+        }
+    }
+
+    fn color_for(&self, target_wid: u32) -> (f64, f64, f64, f64) {
+        if target_wid == self.focused_wid { self.active_color } else { self.inactive_color }
     }
 
     fn is_overlay(&self, wid: u32) -> bool {
@@ -36,12 +50,13 @@ impl BorderMap {
     /// Add border (batch mode, uses main cid).
     fn add_batch(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
-        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width) {
+        let color = self.color_for(target_wid);
+        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
 
-    /// Add border (event mode, fresh connection since tags poisoned main cid).
+    /// Add border (event mode, fresh connection).
     fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
 
@@ -68,7 +83,8 @@ impl BorderMap {
             c
         };
         if fresh == 0 { return; }
-        if let Some((cid, wid)) = create_overlay(fresh, target_wid, self.border_width) {
+        let color = self.color_for(target_wid);
+        if let Some((cid, wid)) = create_overlay(fresh, target_wid, self.border_width, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         } else {
             unsafe { SLSReleaseConnection(fresh); }
@@ -159,6 +175,69 @@ impl BorderMap {
             );
         }
     }
+
+    /// Detect focused window and update borders if focus changed.
+    fn update_focus(&mut self) {
+        let front = get_front_window(self.main_cid);
+        if front == 0 || front == self.focused_wid { return; }
+
+        let old = self.focused_wid;
+        self.focused_wid = front;
+
+        // Recreate both old and new focused borders with correct colors
+        if self.overlays.contains_key(&old) {
+            self.recreate(old);
+        }
+        if self.overlays.contains_key(&front) {
+            self.recreate(front);
+        }
+    }
+}
+
+/// Get the front (focused) window ID.
+fn get_front_window(cid: CGSConnectionID) -> u32 {
+    unsafe {
+        let mut psn = ProcessSerialNumber { high: 0, low: 0 };
+        _SLPSGetFrontProcess(&mut psn);
+        let mut target_cid: CGSConnectionID = 0;
+        SLSGetConnectionIDForPSN(cid, &mut psn, &mut target_cid);
+
+        // Get active space
+        let uuid = SLSCopyActiveMenuBarDisplayIdentifier(cid);
+        if uuid.is_null() { return 0; }
+        let active_sid = SLSManagedDisplayGetCurrentSpace(cid, uuid);
+        CFRelease(uuid as CFTypeRef);
+        if active_sid == 0 { return 0; }
+
+        let set_tags: u64 = 1;
+        let clear_tags: u64 = 0;
+        let space_list = cfarray_of_cfnumbers(
+            &active_sid as *const _ as *const _,
+            std::mem::size_of::<u64>(),
+            1,
+            kCFNumberSInt64Type,
+        );
+
+        let window_list = SLSCopyWindowsWithOptionsAndTags(
+            cid, target_cid as u32, space_list, 0x2, &set_tags, &clear_tags,
+        );
+
+        let mut wid: u32 = 0;
+        if !window_list.is_null() {
+            let count = CFArrayGetCount(window_list);
+            if count > 0 {
+                // First window in the list is the frontmost
+                let mut v: CFTypeRef = ptr::null();
+                let first = CFArrayGetValueAtIndex(window_list, 0);
+                if !first.is_null() {
+                    CFNumberGetValue(first, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+                }
+            }
+            CFRelease(window_list);
+        }
+        CFRelease(space_list);
+        wid
+    }
 }
 
 fn main() {
@@ -191,6 +270,10 @@ fn main() {
     // Discover and create borders
     let mut borders = BorderMap::new(cid, own_pid, border_width);
 
+    // Detect initial focus BEFORE creating borders (so colors are correct)
+    borders.focused_wid = get_front_window(cid);
+    eprintln!("focused: {}", borders.focused_wid);
+
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
         borders.add_batch(target);
     } else {
@@ -202,7 +285,6 @@ fn main() {
         eprintln!("{} borders created", borders.overlays.len());
     }
 
-    // Subscribe for per-window events (NO tags — they poison SLSNewWindow globally)
     borders.subscribe_all();
 
     eprintln!("{} overlays tracked", borders.overlays.len());
@@ -230,6 +312,7 @@ fn main() {
             let mut moved: HashSet<u32> = HashSet::new();
             let mut resized: HashSet<u32> = HashSet::new();
             let mut destroyed: HashSet<u32> = HashSet::new();
+            let mut needs_resubscribe = false;
 
             for event in events {
                 match event {
@@ -257,7 +340,10 @@ fn main() {
                     }
                     Event::Hide(wid) => borders.hide(wid),
                     Event::Unhide(wid) => borders.unhide(wid),
-                    Event::SpaceChange | Event::FrontChange => {}
+                    Event::FrontChange => {
+                        needs_resubscribe = true; // focus change may need resubscribe
+                    }
+                    Event::SpaceChange => {}
                 }
             }
 
@@ -306,7 +392,6 @@ fn main() {
                 }
             }
 
-            let mut needs_resubscribe = false;
             for &wid in &ready {
                 pending.remove(&wid);
                 if !skip.contains(&wid) {
@@ -329,6 +414,9 @@ fn main() {
                     needs_resubscribe = true;
                 }
             }
+
+            // Update focus (detects front window, recolors if changed)
+            borders.update_focus();
 
             // Re-subscribe ALL tracked windows (SLSRequestNotificationsForWindows replaces, not appends)
             if needs_resubscribe || !destroyed.is_empty() {
@@ -416,6 +504,7 @@ fn create_overlay(
     cid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
+    color: (f64, f64, f64, f64),
 ) -> Option<(CGSConnectionID, u32)> {
     unsafe {
         let mut bounds = CGRect::default();
@@ -462,7 +551,7 @@ fn create_overlay(
         let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
         let r = radius.min(max_r);
 
-        CGContextSetRGBStrokeColor(ctx, 0.32, 0.58, 0.89, 1.0);
+        CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
         CGContextSetLineWidth(ctx, bw);
         let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
         if !path.is_null() {
