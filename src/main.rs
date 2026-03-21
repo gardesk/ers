@@ -62,27 +62,20 @@ fn main() {
 
     let (tx, rx) = mpsc::channel::<WmEvent>();
 
-    events::init(tx);
-    events::register(cid);
-    setup_event_port(cid);
+    let _ = tx;
 
-    let mut tracker = WindowTracker::new(cid);
-
-    if let Some(test_wid) = config.test_wid {
-        tracing::info!(wid = test_wid, "test mode: drawing border on specific window");
-        tracker.test_wid(test_wid, &config);
-    } else {
-        tracker.add_existing_windows(&config);
-        // DISABLED: isolating new() visibility
-        // tracker.determine_focus(&config);
-    }
+    // Full discovery + border creation with fresh SLS connections
+    let mut tracker = windows::WindowTracker::new(cid);
+    tracker.add_existing_windows(&config);
+    eprintln!("[main] {} borders created", tracker.border_count());
+    std::mem::forget(tracker);
 
     // DISABLED: keep tracker on main thread, no events
     // let config_clone = config.clone();
     // std::thread::spawn(move || {
     //     event_loop(rx, &mut tracker, &config_clone);
     // });
-    let _ = (rx, tracker);
+    let _ = rx;
 
     // Run the CFRunLoop on the main thread — required for SLS events
     tracing::info!("entering CFRunLoop");
@@ -190,7 +183,8 @@ fn run_smoke_test() {
     eprintln!("[smoke] cid={cid}");
     unsafe {
         // --- Test A: direct create (known working) ---
-        eprintln!("[smoke A] direct create 200x200 at (100,100)");
+        // Test A: main connection (known working)
+        eprintln!("[smoke A] main cid={cid}, 200x200 RED at (100,100)");
         let wid_a = {
             let rect = CGRect::new(0.0, 0.0, 200.0, 200.0);
             let mut region: CFTypeRef = std::ptr::null();
@@ -262,7 +256,48 @@ fn run_smoke_test() {
             eprintln!("[smoke B] moved to (400,100) — GREEN square should appear next to red");
         }
 
-        eprintln!("[smoke] RED=(100,100) direct | GREEN=(400,100) reshape+move");
+        // POISON TEST: call SLSCopyManagedDisplaySpaces on main cid first
+        {
+            let ds = SLSCopyManagedDisplaySpaces(cid);
+            if !ds.is_null() {
+                eprintln!("[smoke] POISON: called SLSCopyManagedDisplaySpaces, releasing");
+                CFRelease(ds);
+            }
+        }
+
+        // Test C: SLSNewConnection AFTER the poison
+        eprintln!("[smoke C] SLSNewConnection AFTER SLSCopyManagedDisplaySpaces, 200x200 YELLOW at (700,100)");
+        {
+            let mut new_cid: i32 = 0;
+            SLSNewConnection(0, &mut new_cid);
+            eprintln!("[smoke C] new_cid={new_cid}");
+            let rect = CGRect::new(0.0, 0.0, 200.0, 200.0);
+            let mut region: CFTypeRef = std::ptr::null();
+            CGSNewRegionWithRect(&rect, &mut region);
+            let mut wid: u32 = 0;
+            SLSNewWindow(new_cid, 2, 700.0, 100.0, region, &mut wid);
+            CFRelease(region);
+            SLSSetWindowResolution(new_cid, wid, 2.0);
+            SLSSetWindowOpacity(new_cid, wid, false);
+            SLSSetWindowLevel(new_cid, wid, 25);
+            SLSOrderWindow(new_cid, wid, 1, 0);
+            let ctx = SLWindowContextCreate(new_cid, wid, std::ptr::null());
+            eprintln!("[smoke C] wid={wid} ctx_null={}", ctx.is_null());
+            if !ctx.is_null() {
+                let full = CGRect::new(0.0, 0.0, 400.0, 400.0);
+                CGContextClearRect(ctx, full);
+                CGContextSetRGBFillColor(ctx, 1.0, 1.0, 0.0, 1.0); // YELLOW
+                let path = CGPathCreateMutable();
+                CGPathAddRect(path, std::ptr::null(), full);
+                CGContextAddPath(ctx, path as CGPathRef);
+                CGContextFillPath(ctx);
+                CGPathRelease(path as CGPathRef);
+                CGContextFlush(ctx);
+                SLSFlushWindowContentRegion(new_cid, wid, std::ptr::null());
+            }
+        }
+
+        eprintln!("[smoke] RED=(100,100) main | GREEN=(400,100) reshape | YELLOW=(700,100) SLSNewConnection");
         eprintln!("[smoke] Ctrl-C to exit");
         CFRunLoopRun();
     }
