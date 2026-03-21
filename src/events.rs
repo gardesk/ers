@@ -78,11 +78,12 @@ fn is_own_window(cid: CGSConnectionID, wid: u32) -> bool {
 /// Data payload starts with the window ID as a u32.
 unsafe extern "C" fn window_modify_handler(
     event: u32,
-    data: *const u32,
+    data: *const u8,
     _data_len: usize,
     context: *mut std::ffi::c_void,
 ) {
-    let wid = unsafe { *data };
+    unsafe {
+    let wid = std::ptr::read_unaligned(data as *const u32);
     let cid = context as isize as CGSConnectionID;
 
     if is_own_window(cid, wid) {
@@ -103,39 +104,32 @@ unsafe extern "C" fn window_modify_handler(
         EVENT_WINDOW_TITLE | EVENT_WINDOW_UPDATE => send(WmEvent::FocusCheck),
         _ => {}
     }
+    }
 }
 
 /// Handler for window create/destroy events.
-/// Data payload: { sid: u64, wid: u32 }
-#[repr(C)]
-struct WindowSpawnData {
-    sid: u64,
-    wid: u32,
-}
-
+/// Data payload: { sid: u64, wid: u32 } — may be unaligned.
 unsafe extern "C" fn window_spawn_handler(
     event: u32,
-    data: *const WindowSpawnData,
+    data: *const u8,
     _data_len: usize,
     context: *mut std::ffi::c_void,
 ) {
-    let data = unsafe { &*data };
-    let cid = context as isize as CGSConnectionID;
+    unsafe {
+        // Read fields with unaligned reads — SLS event data is not guaranteed aligned
+        let sid = std::ptr::read_unaligned(data as *const u64);
+        let wid = std::ptr::read_unaligned(data.add(8) as *const u32);
+        let cid = context as isize as CGSConnectionID;
 
-    if data.wid == 0 || is_own_window(cid, data.wid) {
-        return;
-    }
+        if wid == 0 || is_own_window(cid, wid) {
+            return;
+        }
 
-    match event {
-        EVENT_WINDOW_CREATE => send(WmEvent::WindowCreate {
-            wid: data.wid,
-            sid: data.sid,
-        }),
-        EVENT_WINDOW_DESTROY => send(WmEvent::WindowDestroy {
-            wid: data.wid,
-            sid: data.sid,
-        }),
-        _ => {}
+        match event {
+            EVENT_WINDOW_CREATE => send(WmEvent::WindowCreate { wid, sid }),
+            EVENT_WINDOW_DESTROY => send(WmEvent::WindowDestroy { wid, sid }),
+            _ => {}
+        }
     }
 }
 

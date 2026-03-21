@@ -74,10 +74,12 @@ impl WindowTracker {
                 let display_count = CFArrayGetCount(display_spaces);
                 for i in 0..display_count {
                     let display_ref = CFArrayGetValueAtIndex(display_spaces, i);
+                    if display_ref.is_null() { continue; }
                     // Get "Spaces" key from display dict
                     let spaces_key_bytes = b"Spaces\0";
                     let spaces_key =
-                        CFStringCreateWithCString(std::ptr::null(), spaces_key_bytes.as_ptr(), 0x0600_0100);
+                        CFStringCreateWithCString(std::ptr::null(), spaces_key_bytes.as_ptr(), 0x0800_0100);
+                    if spaces_key.is_null() { continue; }
                     let spaces_ref = CFDictionaryGetValue(display_ref, spaces_key as CFTypeRef);
                     CFRelease(spaces_key as CFTypeRef);
 
@@ -85,12 +87,14 @@ impl WindowTracker {
                         let spaces_count = CFArrayGetCount(spaces_ref);
                         for j in 0..spaces_count {
                             let space_ref = CFArrayGetValueAtIndex(spaces_ref, j);
+                            if space_ref.is_null() { continue; }
                             let id_key_bytes = b"id64\0";
                             let id_key = CFStringCreateWithCString(
                                 std::ptr::null(),
                                 id_key_bytes.as_ptr(),
-                                0x0600_0100,
+                                0x0800_0100,
                             );
+                            if id_key.is_null() { continue; }
                             let sid_ref = CFDictionaryGetValue(space_ref, id_key as CFTypeRef);
                             CFRelease(id_key as CFTypeRef);
 

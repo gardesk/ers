@@ -473,11 +473,11 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn getpid() -> i32;
     pub fn pid_for_task(task: u32, pid: *mut i32) -> i32;
-    pub fn mach_task_self_() -> u32;
+    pub static mach_task_self_: u32;
 }
 
 pub fn mach_task_self() -> u32 {
-    unsafe { mach_task_self_() }
+    unsafe { mach_task_self_ }
 }
 
 // --- Helper: create CFArray of CFNumbers ---

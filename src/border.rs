@@ -371,7 +371,7 @@ fn disable_shadow(wid: u32) {
         // "com.apple.WindowShadowDensity" as CFString
         // We build it via CoreFoundation to avoid linking Foundation
         let key_bytes = b"com.apple.WindowShadowDensity\0";
-        let key = CFStringCreateWithCString(ptr::null(), key_bytes.as_ptr(), 0x0600_0100);
+        let key = CFStringCreateWithCString(ptr::null(), key_bytes.as_ptr(), 0x0800_0100);
 
         let keys = [key as CFTypeRef];
         let values = [density_cf as CFTypeRef];

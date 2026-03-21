@@ -46,16 +46,10 @@ fn main() {
 
     let (tx, rx) = mpsc::channel::<WmEvent>();
 
-    // Initialize event system
     events::init(tx);
-
-    // Register SLS event handlers
     events::register(cid);
-
-    // Set up the SLS event port on the CFRunLoop
     setup_event_port(cid);
 
-    // Create window tracker and discover existing windows
     let mut tracker = WindowTracker::new(cid);
 
     if let Some(test_wid) = config.test_wid {
