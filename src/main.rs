@@ -74,7 +74,9 @@ impl BorderMap {
     fn remove(&mut self, target_wid: u32) {
         if let Some(overlay) = self.overlays.remove(&target_wid) {
             unsafe {
-                // Triple-ensure visual cleanup on Tahoe
+                // Move off-screen first (most reliable hide on Tahoe)
+                let offscreen = CGPoint { x: -99999.0, y: -99999.0 };
+                SLSMoveWindow(overlay.cid, overlay.wid, &offscreen);
                 SLSSetWindowAlpha(overlay.cid, overlay.wid, 0.0);
                 SLSOrderWindow(overlay.cid, overlay.wid, 0, 0);
                 SLSReleaseWindow(overlay.cid, overlay.wid);
