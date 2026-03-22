@@ -183,6 +183,8 @@ impl BorderMap {
 
         let old = self.focused_wid;
         self.focused_wid = front;
+        let tracked = self.overlays.contains_key(&front);
+        eprintln!("[focus] {old} -> {front} (tracked={tracked})");
 
         // Recreate both old and new focused borders with correct colors
         if self.overlays.contains_key(&old) {
@@ -403,15 +405,9 @@ fn main() {
                 }
             }
 
-            // Moves (reposition existing borders)
-            for wid in &moved {
-                if !resized.contains(wid) && borders.overlays.contains_key(wid) {
-                    borders.reposition(*wid);
-                }
-            }
-
-            // Resizes (recreate at final size — includes just-promoted windows)
-            for wid in &resized {
+            // Moves and resizes: recreate at new position/size
+            let changed: HashSet<u32> = moved.union(&resized).copied().collect();
+            for wid in &changed {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
                     needs_resubscribe = true;
