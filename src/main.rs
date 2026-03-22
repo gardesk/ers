@@ -56,38 +56,13 @@ impl BorderMap {
         }
     }
 
-    /// Add border (event mode, fresh connection).
+    /// Add border (event mode). Uses main_cid — fresh connections create
+    /// invisible windows on Tahoe.
     fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
-
-        // Filter: must be visible, owned by another process, not tiny
-        unsafe {
-            let mut shown = false;
-            SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
-            if !shown { return; }
-
-            let mut wid_cid: CGSConnectionID = 0;
-            SLSGetWindowOwner(self.main_cid, target_wid, &mut wid_cid);
-            let mut pid: i32 = 0;
-            SLSConnectionGetPID(wid_cid, &mut pid);
-            if pid == self.own_pid { return; }
-
-            let mut bounds = CGRect::default();
-            SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
-            if bounds.size.width < 50.0 || bounds.size.height < 50.0 { return; }
-        }
-
-        let fresh = unsafe {
-            let mut c: CGSConnectionID = 0;
-            SLSNewConnection(0, &mut c);
-            c
-        };
-        if fresh == 0 { return; }
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(fresh, target_wid, self.border_width, color) {
+        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
-        } else {
-            unsafe { SLSReleaseConnection(fresh); }
         }
     }
 
@@ -176,74 +151,116 @@ impl BorderMap {
         }
     }
 
-    /// Detect focused window and update borders if focus changed.
-    fn update_focus(&mut self) {
-        let front = get_front_window(self.main_cid);
-        if front == 0 || front == self.focused_wid { return; }
+    /// Redraw an existing overlay with a new color (no destroy/recreate).
+    fn redraw(&self, target_wid: u32) {
+        if let Some(overlay) = self.overlays.get(&target_wid) {
+            unsafe {
+                let mut bounds = CGRect::default();
+                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                    return;
+                }
+                let bw = self.border_width;
+                let ow = bounds.size.width + 2.0 * bw;
+                let oh = bounds.size.height + 2.0 * bw;
+
+                let ctx = SLWindowContextCreate(overlay.cid, overlay.wid, ptr::null());
+                if ctx.is_null() { return; }
+
+                let full = CGRect::new(0.0, 0.0, ow, oh);
+                CGContextClearRect(ctx, full);
+
+                let color = self.color_for(target_wid);
+                let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, ow - bw, oh - bw);
+                let radius = 10.0_f64;
+                let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
+                let r = radius.min(max_r);
+
+                CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
+                CGContextSetLineWidth(ctx, bw);
+                let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
+                if !path.is_null() {
+                    CGContextAddPath(ctx, path);
+                    CGContextStrokePath(ctx);
+                    CGPathRelease(path);
+                }
+
+                CGContextFlush(ctx);
+                SLSFlushWindowContentRegion(overlay.cid, overlay.wid, ptr::null());
+                CGContextRelease(ctx);
+            }
+        }
+    }
+
+    /// Detect focused window and update border colors if focus changed.
+    /// Returns true if focus changed (callers should resubscribe).
+    fn update_focus(&mut self) -> bool {
+        let front = get_front_window(self.own_pid);
+        if front == 0 || front == self.focused_wid { return false; }
 
         let old = self.focused_wid;
         self.focused_wid = front;
-        let tracked = self.overlays.contains_key(&front);
-        eprintln!("[focus] {old} -> {front} (tracked={tracked})");
+        eprintln!("[focus] {} -> {} (tracked={})", old, front, self.overlays.contains_key(&front));
 
-        // Recreate both old and new focused borders with correct colors
+        // Recreate overlays with new colors — re-obtaining a CGContext
+        // for an existing window is unreliable on Tahoe
         if self.overlays.contains_key(&old) {
             self.recreate(old);
         }
         if self.overlays.contains_key(&front) {
             self.recreate(front);
         }
+        true
     }
 }
 
-/// Get the front (focused) window ID using a fresh connection
-/// (space queries poison the main cid).
-fn get_front_window(_main_cid: CGSConnectionID) -> u32 {
+/// Get the front (focused) window ID using CGWindowListCopyWindowInfo.
+/// Avoids all SLS display/space queries which poison SLSNewWindow globally.
+fn get_front_window(own_pid: i32) -> u32 {
     unsafe {
-        let mut cid: CGSConnectionID = 0;
-        SLSNewConnection(0, &mut cid);
-        if cid == 0 { return 0; }
-        let mut psn = ProcessSerialNumber { high: 0, low: 0 };
-        _SLPSGetFrontProcess(&mut psn);
-        let mut target_cid: CGSConnectionID = 0;
-        SLSGetConnectionIDForPSN(cid, &mut psn, &mut target_cid);
+        let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+        if list.is_null() { return 0; }
 
-        // Get active space
-        let uuid = SLSCopyActiveMenuBarDisplayIdentifier(cid);
-        if uuid.is_null() { return 0; }
-        let active_sid = SLSManagedDisplayGetCurrentSpace(cid, uuid);
-        CFRelease(uuid as CFTypeRef);
-        if active_sid == 0 { return 0; }
+        let count = CFArrayGetCount(list);
+        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
+        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
+        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
 
-        let set_tags: u64 = 1;
-        let clear_tags: u64 = 0;
-        let space_list = cfarray_of_cfnumbers(
-            &active_sid as *const _ as *const _,
-            std::mem::size_of::<u64>(),
-            1,
-            kCFNumberSInt64Type,
-        );
+        // CGWindowListCopyWindowInfo returns windows in front-to-back order.
+        // First layer-0 window not owned by us is the focused window.
+        let mut front_wid: u32 = 0;
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(list, i);
+            if dict.is_null() { continue; }
 
-        let window_list = SLSCopyWindowsWithOptionsAndTags(
-            cid, target_cid as u32, space_list, 0x2, &set_tags, &clear_tags,
-        );
+            let mut v: CFTypeRef = ptr::null();
 
-        let mut wid: u32 = 0;
-        if !window_list.is_null() {
-            let count = CFArrayGetCount(window_list);
-            if count > 0 {
-                // First window in the list is the frontmost
-                let mut v: CFTypeRef = ptr::null();
-                let first = CFArrayGetValueAtIndex(window_list, 0);
-                if !first.is_null() {
-                    CFNumberGetValue(first, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
-                }
+            let mut layer: i32 = -1;
+            if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            CFRelease(window_list);
+            if layer != 0 { continue; }
+
+            let mut pid: i32 = 0;
+            if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
+            }
+            if pid == own_pid { continue; }
+
+            let mut wid: u32 = 0;
+            if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+            }
+            if wid != 0 {
+                front_wid = wid;
+                break;
+            }
         }
-        CFRelease(space_list);
-        SLSReleaseConnection(cid);
-        wid
+
+        CFRelease(wid_key as CFTypeRef);
+        CFRelease(pid_key as CFTypeRef);
+        CFRelease(layer_key as CFTypeRef);
+        CFRelease(list);
+        front_wid
     }
 }
 
@@ -290,7 +307,9 @@ fn main() {
 
     borders.subscribe_all();
 
-    borders.update_focus();
+    if borders.update_focus() {
+        borders.subscribe_all();
+    }
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
@@ -414,8 +433,10 @@ fn main() {
                 }
             }
 
-            // Update focus (detects front window, recolors if changed)
-            borders.update_focus();
+            // Update focus (detects front window, recreates borders if changed)
+            if borders.update_focus() {
+                needs_resubscribe = true;
+            }
 
             // Re-subscribe ALL tracked windows (SLSRequestNotificationsForWindows replaces, not appends)
             if needs_resubscribe || !destroyed.is_empty() {
@@ -507,10 +528,13 @@ fn create_overlay(
 ) -> Option<(CGSConnectionID, u32)> {
     unsafe {
         let mut bounds = CGRect::default();
-        if SLSGetWindowBounds(cid, target_wid, &mut bounds) != kCGErrorSuccess {
+        let rc = SLSGetWindowBounds(cid, target_wid, &mut bounds);
+        if rc != kCGErrorSuccess {
+            eprintln!("[create_overlay] SLSGetWindowBounds failed for wid={target_wid} rc={rc}");
             return None;
         }
         if bounds.size.width < 10.0 || bounds.size.height < 10.0 {
+            eprintln!("[create_overlay] wid={target_wid} too small: {}x{}", bounds.size.width, bounds.size.height);
             return None;
         }
 
@@ -523,12 +547,21 @@ fn create_overlay(
         let frame = CGRect::new(0.0, 0.0, ow, oh);
         let mut region: CFTypeRef = ptr::null();
         CGSNewRegionWithRect(&frame, &mut region);
-        if region.is_null() { return None; }
+        if region.is_null() {
+            eprintln!("[create_overlay] CGSNewRegionWithRect failed for wid={target_wid}");
+            return None;
+        }
 
         let mut wid: u32 = 0;
         SLSNewWindow(cid, 2, ox as f32, oy as f32, region, &mut wid);
         CFRelease(region);
-        if wid == 0 { return None; }
+        if wid == 0 {
+            eprintln!("[create_overlay] SLSNewWindow returned 0 for target={target_wid} cid={cid}");
+            return None;
+        }
+
+        eprintln!("[create_overlay] created overlay wid={wid} for target={target_wid} color=({:.2},{:.2},{:.2},{:.2})",
+            color.0, color.1, color.2, color.3);
 
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
@@ -538,6 +571,7 @@ fn create_overlay(
         // Draw border (point coordinates)
         let ctx = SLWindowContextCreate(cid, wid, ptr::null());
         if ctx.is_null() {
+            eprintln!("[create_overlay] SLWindowContextCreate returned null for overlay wid={wid}");
             SLSReleaseWindow(cid, wid);
             return None;
         }
