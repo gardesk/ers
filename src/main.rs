@@ -798,6 +798,11 @@ fn create_overlay(
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
         SLSSetWindowLevel(cid, wid, 0);
+
+        // Make overlay click-through (bit 1) and disable shadow (bit 9)
+        let tags: u64 = (1 << 1) | (1 << 9);
+        SLSSetWindowTags(cid, wid, &tags, 0x40);
+
         SLSOrderWindow(cid, wid, 1, target_wid);
 
         // Draw border (point coordinates)
