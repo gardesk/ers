@@ -70,7 +70,10 @@ unsafe extern "C" fn window_handler(
             EVENT_WINDOW_MOVE => send(Event::Move(wid)),
             EVENT_WINDOW_RESIZE => send(Event::Resize(wid)),
             EVENT_WINDOW_CLOSE => send(Event::Close(wid)),
-            EVENT_WINDOW_REORDER => send(Event::Move(wid)), // reorder often means move
+            EVENT_WINDOW_REORDER => {
+                send(Event::Move(wid));
+                send(Event::FrontChange); // reorder may be intra-app focus change
+            }
             EVENT_WINDOW_HIDE => send(Event::Hide(wid)),
             EVENT_WINDOW_UNHIDE => send(Event::Unhide(wid)),
             _ => {}

@@ -62,6 +62,24 @@ impl BorderMap {
     /// invisible windows on Tahoe.
     fn add_fresh(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
+
+        // Filter: must be visible, owned by another process, not tiny
+        unsafe {
+            let mut shown = false;
+            SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
+            if !shown { return; }
+
+            let mut wid_cid: CGSConnectionID = 0;
+            SLSGetWindowOwner(self.main_cid, target_wid, &mut wid_cid);
+            let mut pid: i32 = 0;
+            SLSConnectionGetPID(wid_cid, &mut pid);
+            if pid == self.own_pid { return; }
+
+            let mut bounds = CGRect::default();
+            SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
+            if bounds.size.width < 50.0 || bounds.size.height < 50.0 { return; }
+        }
+
         let color = self.color_for(target_wid);
         if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
@@ -439,14 +457,15 @@ fn main() {
 
             // Moves: reposition overlay (no destroy/create)
             for wid in &moved {
-                if !resized.contains(wid) {
+                if !resized.contains(wid) && !ready.contains(wid) {
                     borders.reposition(*wid);
                 }
             }
 
             // Resizes: must recreate (can't reshape windows on Tahoe)
+            // Skip windows just created this batch — already at correct size
             for wid in &resized {
-                if borders.overlays.contains_key(wid) {
+                if !ready.contains(wid) && borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
                     needs_resubscribe = true;
                 }
