@@ -232,10 +232,22 @@ impl BorderMap {
     }
 }
 
-/// Get the front (focused) window ID using CGWindowListCopyWindowInfo.
-/// Avoids all SLS display/space queries which poison SLSNewWindow globally.
+/// Get the front (focused) window ID.
+/// Uses _SLPSGetFrontProcess to find the active app, then CGWindowListCopyWindowInfo
+/// to find its topmost layer-0 window. This works with tiling WMs where focus
+/// changes don't alter z-order.
 fn get_front_window(own_pid: i32) -> u32 {
     unsafe {
+        // Step 1: get the front (active) process PID
+        let mut psn = ProcessSerialNumber { high: 0, low: 0 };
+        _SLPSGetFrontProcess(&mut psn);
+        let mut front_cid: CGSConnectionID = 0;
+        SLSGetConnectionIDForPSN(SLSMainConnectionID(), &mut psn, &mut front_cid);
+        let mut front_pid: i32 = 0;
+        SLSConnectionGetPID(front_cid, &mut front_pid);
+        if front_pid == 0 || front_pid == own_pid { return 0; }
+
+        // Step 2: find the topmost layer-0 window belonging to that process
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
         if list.is_null() { return 0; }
 
@@ -244,8 +256,6 @@ fn get_front_window(own_pid: i32) -> u32 {
         let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
         let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
 
-        // CGWindowListCopyWindowInfo returns windows in front-to-back order.
-        // First layer-0 window not owned by us is the focused window.
         let mut front_wid: u32 = 0;
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
@@ -263,7 +273,7 @@ fn get_front_window(own_pid: i32) -> u32 {
             if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
             }
-            if pid == own_pid { continue; }
+            if pid != front_pid { continue; }
 
             let mut wid: u32 = 0;
             if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
