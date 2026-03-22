@@ -21,6 +21,7 @@ struct BorderMap {
     main_cid: CGSConnectionID,
     own_pid: i32,
     border_width: f64,
+    radius: f64,
     focused_wid: u32,
     active_color: (f64, f64, f64, f64),
     inactive_color: (f64, f64, f64, f64),
@@ -34,6 +35,7 @@ impl BorderMap {
             main_cid: cid,
             own_pid,
             border_width,
+            radius: 10.0,
             focused_wid: 0,
             active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
             inactive_color: (0.35, 0.35, 0.35, 0.8),  // dim gray
@@ -53,7 +55,7 @@ impl BorderMap {
     fn add_batch(&mut self, target_wid: u32) {
         if self.overlays.contains_key(&target_wid) { return; }
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, color) {
+        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, self.radius, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
@@ -81,7 +83,7 @@ impl BorderMap {
         }
 
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, color) {
+        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, self.radius, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
@@ -194,20 +196,7 @@ impl BorderMap {
 
                 let color = self.color_for(target_wid);
                 let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, ow - bw, oh - bw);
-                let radius = 10.0_f64;
-                let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
-                let r = radius.min(max_r);
-
-                CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
-                CGContextSetLineWidth(ctx, bw);
-                let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
-                if !path.is_null() {
-                    CGContextAddPath(ctx, path);
-                    CGContextStrokePath(ctx);
-                    CGPathRelease(path);
-                }
-
-                CGContextFlush(ctx);
+                draw_border(ctx, ow, oh, bw, self.radius, color);
                 SLSFlushWindowContentRegion(overlay.cid, overlay.wid, ptr::null());
                 CGContextRelease(ctx);
             }
@@ -298,19 +287,69 @@ fn get_front_window(own_pid: i32) -> u32 {
     }
 }
 
+/// Parse hex color string (#RRGGBB or #RRGGBBAA) to (r, g, b, a) floats.
+fn parse_color(s: &str) -> Option<(f64, f64, f64, f64)> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 && hex.len() != 8 { return None; }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f64 / 255.0;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f64 / 255.0;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f64 / 255.0;
+    let a = if hex.len() == 8 {
+        u8::from_str_radix(&hex[6..8], 16).ok()? as f64 / 255.0
+    } else { 1.0 };
+    Some((r, g, b, a))
+}
+
+fn flag_value<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    args.iter()
+        .position(|s| flags.iter().any(|f| s == f))
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+}
+
+fn print_help() {
+    eprintln!("ers — window border renderer for tarmac");
+    eprintln!();
+    eprintln!("USAGE: ers [OPTIONS] [WINDOW_ID]");
+    eprintln!();
+    eprintln!("OPTIONS:");
+    eprintln!("  -w, --width <PX>       Border width in pixels (default: 4.0)");
+    eprintln!("  -r, --radius <PX>      Corner radius (default: 10.0)");
+    eprintln!("  -c, --color <HEX>      Active border color (default: #5294e2)");
+    eprintln!("  -i, --inactive <HEX>   Inactive border color (default: #59595980)");
+    eprintln!("      --active-only      Only show border on focused window");
+    eprintln!("      --list             List on-screen windows and exit");
+    eprintln!("  -h, --help             Show this help");
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|s| s == "--help" || s == "-h") {
+        print_help();
+        return;
+    }
 
     if args.get(1).is_some_and(|s| s == "--list") {
         list_windows();
         return;
     }
 
-    let border_width: f64 = args
-        .iter()
-        .position(|s| s == "--width" || s == "-w")
-        .and_then(|i| args.get(i + 1)?.parse().ok())
+    let border_width: f64 = flag_value(&args, &["--width", "-w"])
+        .and_then(|v| v.parse().ok())
         .unwrap_or(4.0);
+
+    let radius: f64 = flag_value(&args, &["--radius", "-r"])
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10.0);
+
+    let active_color = flag_value(&args, &["--color", "-c"])
+        .and_then(parse_color)
+        .unwrap_or((0.32, 0.58, 0.89, 1.0));
+
+    let inactive_color = flag_value(&args, &["--inactive", "-i"])
+        .and_then(parse_color)
+        .unwrap_or((0.35, 0.35, 0.35, 0.8));
 
     let active_only = args.iter().any(|s| s == "--active-only");
 
@@ -329,6 +368,9 @@ fn main() {
 
     // Discover and create borders
     let mut borders = BorderMap::new(cid, own_pid, border_width);
+    borders.radius = radius;
+    borders.active_color = active_color;
+    borders.inactive_color = inactive_color;
     borders.active_only = active_only;
 
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -583,10 +625,41 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     }
 }
 
+/// Draw a border ring into an existing CGContext, clearing first.
+fn draw_border(
+    ctx: CGContextRef,
+    width: f64,
+    height: f64,
+    border_width: f64,
+    radius: f64,
+    color: (f64, f64, f64, f64),
+) {
+    unsafe {
+        let full = CGRect::new(0.0, 0.0, width, height);
+        CGContextClearRect(ctx, full);
+
+        let bw = border_width;
+        let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, width - bw, height - bw);
+        let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
+        let r = radius.min(max_r);
+
+        CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
+        CGContextSetLineWidth(ctx, bw);
+        let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
+        if !path.is_null() {
+            CGContextAddPath(ctx, path);
+            CGContextStrokePath(ctx);
+            CGPathRelease(path);
+        }
+        CGContextFlush(ctx);
+    }
+}
+
 fn create_overlay(
     cid: CGSConnectionID,
     target_wid: u32,
     border_width: f64,
+    radius: f64,
     color: (f64, f64, f64, f64),
 ) -> Option<(CGSConnectionID, u32)> {
     unsafe {
@@ -639,24 +712,7 @@ fn create_overlay(
             return None;
         }
 
-        let full = CGRect::new(0.0, 0.0, ow, oh);
-        CGContextClearRect(ctx, full);
-
-        let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, ow - bw, oh - bw);
-        let radius = 10.0_f64;
-        let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
-        let r = radius.min(max_r);
-
-        CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
-        CGContextSetLineWidth(ctx, bw);
-        let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
-        if !path.is_null() {
-            CGContextAddPath(ctx, path);
-            CGContextStrokePath(ctx);
-            CGPathRelease(path);
-        }
-
-        CGContextFlush(ctx);
+        draw_border(ctx, ow, oh, bw, radius, color);
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
