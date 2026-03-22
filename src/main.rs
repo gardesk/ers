@@ -192,24 +192,17 @@ impl BorderMap {
     }
 
     /// Detect focused window and update border colors if focus changed.
-    /// Returns true if focus changed (callers should resubscribe).
-    fn update_focus(&mut self) -> bool {
+    fn update_focus(&mut self) {
         let front = get_front_window(self.own_pid);
-        if front == 0 || front == self.focused_wid { return false; }
+        if front == 0 || front == self.focused_wid { return; }
 
         let old = self.focused_wid;
         self.focused_wid = front;
-        eprintln!("[focus] {} -> {} (tracked={})", old, front, self.overlays.contains_key(&front));
+        eprintln!("[focus] {} -> {}", old, front);
 
-        // Recreate overlays with new colors — re-obtaining a CGContext
-        // for an existing window is unreliable on Tahoe
-        if self.overlays.contains_key(&old) {
-            self.recreate(old);
-        }
-        if self.overlays.contains_key(&front) {
-            self.recreate(front);
-        }
-        true
+        // Redraw in-place with new color — no destroy/recreate needed
+        self.redraw(old);
+        self.redraw(front);
     }
 }
 
@@ -307,9 +300,7 @@ fn main() {
 
     borders.subscribe_all();
 
-    if borders.update_focus() {
-        borders.subscribe_all();
-    }
+    borders.update_focus();
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
@@ -326,7 +317,7 @@ fn main() {
                 Err(_) => break,
             };
 
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(16));
 
             let mut events = vec![first];
             while let Ok(e) = rx.try_recv() {
@@ -424,19 +415,23 @@ fn main() {
                 }
             }
 
-            // Moves and resizes: recreate at new position/size
-            let changed: HashSet<u32> = moved.union(&resized).copied().collect();
-            for wid in &changed {
+            // Moves: reposition overlay (no destroy/create)
+            for wid in &moved {
+                if !resized.contains(wid) {
+                    borders.reposition(*wid);
+                }
+            }
+
+            // Resizes: must recreate (can't reshape windows on Tahoe)
+            for wid in &resized {
                 if borders.overlays.contains_key(wid) {
                     borders.recreate(*wid);
                     needs_resubscribe = true;
                 }
             }
 
-            // Update focus (detects front window, recreates borders if changed)
-            if borders.update_focus() {
-                needs_resubscribe = true;
-            }
+            // Update focus (redraws borders in-place if changed)
+            borders.update_focus();
 
             // Re-subscribe ALL tracked windows (SLSRequestNotificationsForWindows replaces, not appends)
             if needs_resubscribe || !destroyed.is_empty() {
