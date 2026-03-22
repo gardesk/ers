@@ -270,10 +270,6 @@ fn main() {
     // Discover and create borders
     let mut borders = BorderMap::new(cid, own_pid, border_width);
 
-    // Detect initial focus BEFORE creating borders (so colors are correct)
-    borders.focused_wid = get_front_window(cid);
-    eprintln!("focused: {}", borders.focused_wid);
-
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
         borders.add_batch(target);
     } else {
@@ -286,6 +282,9 @@ fn main() {
     }
 
     borders.subscribe_all();
+
+    // Detect focus AFTER borders exist (space queries poison the cid)
+    borders.update_focus();
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
