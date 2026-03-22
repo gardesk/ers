@@ -38,8 +38,15 @@ tarmac spawns ers automatically with `--active-only`. Config reloads restart ers
 
 ## Install
 
+Homebrew:
 ```
-cargo install --path .
+brew tap gardesk/tap
+brew install ers
+```
+
+From source:
+```
+cargo install --git https://github.com/gardesk/ers
 ```
 
 ## Requirements
