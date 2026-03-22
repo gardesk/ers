@@ -120,11 +120,14 @@ impl BorderMap {
         }
     }
 
-    /// Recreate overlay at new size. Uses fresh connection.
+    /// Recreate overlay at new size.
     fn recreate(&mut self, target_wid: u32) {
         if !self.overlays.contains_key(&target_wid) { return; }
         self.remove(target_wid);
         self.add_fresh(target_wid);
+        if self.active_only && target_wid != self.focused_wid {
+            self.hide(target_wid);
+        }
         self.subscribe_target(target_wid);
     }
 
@@ -226,6 +229,21 @@ impl BorderMap {
         }
         self.redraw(old);
         self.redraw(front);
+    }
+
+    /// In active-only mode, ensure only the focused overlay is visible.
+    fn enforce_active_only(&self) {
+        if !self.active_only { return; }
+        for (&target_wid, o) in &self.overlays {
+            if target_wid == self.focused_wid {
+                unsafe {
+                    SLSSetWindowLevel(o.cid, o.wid, 25);
+                    SLSOrderWindow(o.cid, o.wid, 1, 0);
+                }
+            } else {
+                unsafe { SLSOrderWindow(o.cid, o.wid, 0, 0); }
+            }
+        }
     }
 }
 
@@ -391,11 +409,17 @@ fn main() {
                         }
                     }
                     Event::Hide(wid) => borders.hide(wid),
-                    Event::Unhide(wid) => borders.unhide(wid),
-                    Event::FrontChange => {
-                        needs_resubscribe = true; // focus change may need resubscribe
+                    Event::Unhide(wid) => {
+                        if !borders.active_only || wid == borders.focused_wid {
+                            borders.unhide(wid);
+                        }
                     }
-                    Event::SpaceChange => {}
+                    Event::FrontChange => {
+                        needs_resubscribe = true;
+                    }
+                    Event::SpaceChange => {
+                        needs_resubscribe = true;
+                    }
                 }
             }
 
@@ -478,6 +502,9 @@ fn main() {
             if needs_resubscribe || !destroyed.is_empty() {
                 borders.subscribe_all();
             }
+
+            // After all processing, enforce active-only visibility
+            borders.enforce_active_only();
         }
     });
 
