@@ -35,7 +35,7 @@ impl BorderMap {
             border_width,
             focused_wid: 0,
             active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
-            inactive_color: (0.18, 0.18, 0.18, 0.5),  // #2d2d2d80
+            inactive_color: (0.35, 0.35, 0.35, 0.8),  // dim gray
         }
     }
 
@@ -194,9 +194,13 @@ impl BorderMap {
     }
 }
 
-/// Get the front (focused) window ID.
-fn get_front_window(cid: CGSConnectionID) -> u32 {
+/// Get the front (focused) window ID using a fresh connection
+/// (space queries poison the main cid).
+fn get_front_window(_main_cid: CGSConnectionID) -> u32 {
     unsafe {
+        let mut cid: CGSConnectionID = 0;
+        SLSNewConnection(0, &mut cid);
+        if cid == 0 { return 0; }
         let mut psn = ProcessSerialNumber { high: 0, low: 0 };
         _SLPSGetFrontProcess(&mut psn);
         let mut target_cid: CGSConnectionID = 0;
@@ -236,6 +240,7 @@ fn get_front_window(cid: CGSConnectionID) -> u32 {
             CFRelease(window_list);
         }
         CFRelease(space_list);
+        SLSReleaseConnection(cid);
         wid
     }
 }
@@ -283,7 +288,6 @@ fn main() {
 
     borders.subscribe_all();
 
-    // Detect focus AFTER borders exist (space queries poison the cid)
     borders.update_focus();
 
     eprintln!("{} overlays tracked", borders.overlays.len());
