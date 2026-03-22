@@ -69,7 +69,7 @@ impl BorderMap {
         if self.overlays.contains_key(&target_wid) { return; }
 
         // Filter: must be visible, owned by another process, not tiny
-        unsafe {
+        let bounds = unsafe {
             let mut shown = false;
             SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
             if !shown { return; }
@@ -83,6 +83,27 @@ impl BorderMap {
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
             if bounds.size.width < 50.0 || bounds.size.height < 50.0 { return; }
+            bounds
+        };
+
+        // Skip container windows: if a tracked window is at the same position,
+        // keep the smaller one (content) and skip the larger one (container)
+        let cx = bounds.origin.x + bounds.size.width / 2.0;
+        let cy = bounds.origin.y + bounds.size.height / 2.0;
+        let area = bounds.size.width * bounds.size.height;
+        for &existing_wid in self.overlays.keys() {
+            unsafe {
+                let mut eb = CGRect::default();
+                if SLSGetWindowBounds(self.main_cid, existing_wid, &mut eb) != kCGErrorSuccess {
+                    continue;
+                }
+                let ecx = eb.origin.x + eb.size.width / 2.0;
+                let ecy = eb.origin.y + eb.size.height / 2.0;
+                if (cx - ecx).abs() < 30.0 && (cy - ecy).abs() < 30.0 {
+                    let earea = eb.size.width * eb.size.height;
+                    if area >= earea { return; } // new window is container, skip
+                }
+            }
         }
 
         let color = self.color_for(target_wid);
@@ -214,6 +235,25 @@ impl BorderMap {
         }
         self.redraw(old);
         self.redraw(front);
+    }
+
+    /// Discover on-screen windows and create borders for any untracked ones.
+    /// Called on space changes to pick up windows from workspaces we haven't visited.
+    fn discover_untracked(&mut self) {
+        let wids = discover_windows(self.main_cid, self.own_pid);
+        let mut added = false;
+        for wid in wids {
+            if !self.overlays.contains_key(&wid) {
+                self.add_fresh(wid);
+                if self.active_only && wid != self.focused_wid {
+                    self.hide(wid);
+                }
+                added = true;
+            }
+        }
+        if added {
+            self.subscribe_all();
+        }
     }
 
     /// In active-only mode, ensure only the focused overlay is visible.
@@ -442,10 +482,12 @@ fn main() {
     let running_bg = Arc::clone(&running);
     let handle = std::thread::spawn(move || {
         use std::collections::HashSet;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
-        // Persist across batches: windows we know about but haven't bordered yet
-        let mut pending: HashSet<u32> = HashSet::new();
+        // Persist across batches: windows we know about but haven't bordered yet.
+        // Value is the time the window was first seen — only promote after 100ms
+        // so tarmac has time to position them.
+        let mut pending: HashMap<u32, Instant> = HashMap::new();
 
         while running_bg.load(Ordering::Relaxed) {
             let first = match rx.recv_timeout(Duration::from_millis(100)) {
@@ -486,7 +528,7 @@ fn main() {
                     }
                     Event::Create(wid) => {
                         if !borders.is_overlay(wid) {
-                            pending.insert(wid);
+                            pending.entry(wid).or_insert_with(Instant::now);
                             borders.subscribe_target(wid);
                         }
                     }
@@ -510,11 +552,13 @@ fn main() {
                 borders.remove(*wid);
             }
 
-            // Promote ALL pending creates that weren't destroyed
-            // (the 150ms debounce is enough for tarmac to position them)
+            // Promote pending creates that have waited ≥100ms (tarmac positioning time)
+            let now = Instant::now();
             let ready: Vec<u32> = pending.iter()
-                .filter(|wid| !destroyed.contains(wid))
-                .copied()
+                .filter(|(wid, seen_at)| {
+                    !destroyed.contains(wid) && now.duration_since(**seen_at) >= Duration::from_millis(100)
+                })
+                .map(|(wid, _)| *wid)
                 .collect();
             // Filter overlapping creates: if two windows overlap, keep smaller one
             let mut bounds_map: Vec<(u32, CGRect)> = Vec::new();
@@ -575,6 +619,11 @@ fn main() {
                     borders.recreate(*wid);
                     needs_resubscribe = true;
                 }
+            }
+
+            // On space change, discover windows we haven't seen yet
+            if needs_resubscribe {
+                borders.discover_untracked();
             }
 
             // Update focus (redraws borders in-place if changed)
