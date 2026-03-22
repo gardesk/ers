@@ -484,8 +484,10 @@ unsafe extern "C" {
     ) -> CFRunLoopSourceRef;
 
     pub fn CFRunLoopGetCurrent() -> CFRunLoopRef;
+    pub fn CFRunLoopGetMain() -> CFRunLoopRef;
     pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     pub fn CFRunLoopRun();
+    pub fn CFRunLoopStop(rl: CFRunLoopRef);
 
     pub static kCFAllocatorDefault: CFAllocatorRef;
     pub static kCFTypeDictionaryKeyCallBacks: c_void;

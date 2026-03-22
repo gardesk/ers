@@ -7,7 +7,9 @@ use events::Event;
 use skylight::*;
 use std::collections::HashMap;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
@@ -85,6 +87,13 @@ impl BorderMap {
         let color = self.color_for(target_wid);
         if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, self.radius, color) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
+        }
+    }
+
+    fn remove_all(&mut self) {
+        let wids: Vec<u32> = self.overlays.keys().copied().collect();
+        for wid in wids {
+            self.remove(wid);
         }
     }
 
@@ -401,17 +410,32 @@ fn main() {
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
+    // SIGINT flag — background thread checks this to clean up
+    let running = Arc::new(AtomicBool::new(true));
+    unsafe {
+        libc::signal(libc::SIGINT, {
+            unsafe extern "C" fn handler(_: libc::c_int) {
+                // Stop CFRunLoop on main thread — this returns control to main()
+                CFRunLoopStop(CFRunLoopGetMain());
+            }
+            handler as libc::sighandler_t
+        });
+    }
+
     // Process events on background thread with coalescing
-    std::thread::spawn(move || {
+    let running_bg = Arc::clone(&running);
+    let handle = std::thread::spawn(move || {
         use std::collections::HashSet;
+        use std::time::Duration;
 
         // Persist across batches: windows we know about but haven't bordered yet
         let mut pending: HashSet<u32> = HashSet::new();
 
-        loop {
-            let first = match rx.recv() {
+        while running_bg.load(Ordering::Relaxed) {
+            let first = match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(e) => e,
-                Err(_) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
             std::thread::sleep(std::time::Duration::from_millis(16));
@@ -548,9 +572,16 @@ fn main() {
             // After all processing, enforce active-only visibility
             borders.enforce_active_only();
         }
+
+        // Clean up all overlays before exiting
+        borders.remove_all();
     });
 
     unsafe { CFRunLoopRun() };
+
+    // SIGINT received — signal background thread to stop and wait
+    running.store(false, Ordering::Relaxed);
+    let _ = handle.join();
 }
 
 fn setup_event_port(cid: CGSConnectionID) {
