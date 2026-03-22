@@ -24,6 +24,7 @@ struct BorderMap {
     focused_wid: u32,
     active_color: (f64, f64, f64, f64),
     inactive_color: (f64, f64, f64, f64),
+    active_only: bool,
 }
 
 impl BorderMap {
@@ -36,6 +37,7 @@ impl BorderMap {
             focused_wid: 0,
             active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
             inactive_color: (0.35, 0.35, 0.35, 0.8),  // dim gray
+            active_only: false,
         }
     }
 
@@ -200,7 +202,10 @@ impl BorderMap {
         self.focused_wid = front;
         eprintln!("[focus] {} -> {}", old, front);
 
-        // Redraw in-place with new color — no destroy/recreate needed
+        if self.active_only {
+            self.hide(old);
+            self.unhide(front);
+        }
         self.redraw(old);
         self.redraw(front);
     }
@@ -271,6 +276,8 @@ fn main() {
         .and_then(|i| args.get(i + 1)?.parse().ok())
         .unwrap_or(4.0);
 
+    let active_only = args.iter().any(|s| s == "--active-only");
+
     let cid = unsafe { SLSMainConnectionID() };
     let own_pid = unsafe {
         let mut pid: i32 = 0;
@@ -286,6 +293,7 @@ fn main() {
 
     // Discover and create borders
     let mut borders = BorderMap::new(cid, own_pid, border_width);
+    borders.active_only = active_only;
 
     if let Some(target) = args.get(1).and_then(|s| s.parse::<u32>().ok()) {
         borders.add_batch(target);
@@ -301,6 +309,17 @@ fn main() {
     borders.subscribe_all();
 
     borders.update_focus();
+
+    if borders.active_only {
+        let focused = borders.focused_wid;
+        let to_hide: Vec<u32> = borders.overlays.keys()
+            .filter(|&&wid| wid != focused)
+            .copied()
+            .collect();
+        for wid in to_hide {
+            borders.hide(wid);
+        }
+    }
 
     eprintln!("{} overlays tracked", borders.overlays.len());
 
@@ -411,6 +430,9 @@ fn main() {
                 pending.remove(&wid);
                 if !skip.contains(&wid) {
                     borders.add_fresh(wid);
+                    if borders.active_only && wid != borders.focused_wid {
+                        borders.hide(wid);
+                    }
                     needs_resubscribe = true;
                 }
             }
