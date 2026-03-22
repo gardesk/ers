@@ -173,8 +173,8 @@ impl BorderMap {
     fn unhide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
             unsafe {
-                SLSSetWindowLevel(o.cid, o.wid, 25);
-                SLSOrderWindow(o.cid, o.wid, 1, 0);
+                SLSSetWindowLevel(o.cid, o.wid, 0);
+                SLSOrderWindow(o.cid, o.wid, 1, target_wid);
             }
         }
     }
@@ -262,8 +262,8 @@ impl BorderMap {
         for (&target_wid, o) in &self.overlays {
             if target_wid == self.focused_wid {
                 unsafe {
-                    SLSSetWindowLevel(o.cid, o.wid, 25);
-                    SLSOrderWindow(o.cid, o.wid, 1, 0);
+                    SLSSetWindowLevel(o.cid, o.wid, 0);
+                    SLSOrderWindow(o.cid, o.wid, 1, target_wid);
                 }
             } else {
                 unsafe { SLSOrderWindow(o.cid, o.wid, 0, 0); }
@@ -797,8 +797,8 @@ fn create_overlay(
 
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
-        SLSSetWindowLevel(cid, wid, 25);
-        SLSOrderWindow(cid, wid, 1, 0);
+        SLSSetWindowLevel(cid, wid, 0);
+        SLSOrderWindow(cid, wid, 1, target_wid);
 
         // Draw border (point coordinates)
         let ctx = SLWindowContextCreate(cid, wid, ptr::null());
