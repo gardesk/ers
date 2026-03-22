@@ -257,6 +257,7 @@ fn get_front_window(own_pid: i32) -> u32 {
         let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
 
         let mut front_wid: u32 = 0;
+        let mut fallback_wid: u32 = 0;
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
             if dict.is_null() { continue; }
@@ -273,16 +274,30 @@ fn get_front_window(own_pid: i32) -> u32 {
             if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
             }
-            if pid != front_pid { continue; }
+            if pid == own_pid { continue; }
 
             let mut wid: u32 = 0;
             if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
             }
-            if wid != 0 {
+            if wid == 0 { continue; }
+
+            // Track first non-self window as fallback (z-order based)
+            if fallback_wid == 0 {
+                fallback_wid = wid;
+            }
+
+            // Prefer a window from the front process
+            if pid == front_pid {
                 front_wid = wid;
                 break;
             }
+        }
+
+        // Fall back to z-order if front process has no visible windows
+        // (e.g., switched to a workspace where the front app has no windows)
+        if front_wid == 0 {
+            front_wid = fallback_wid;
         }
 
         CFRelease(wid_key as CFTypeRef);
