@@ -139,9 +139,8 @@ impl BorderMap {
     fn reposition(&self, target_wid: u32) {
         if let Some(overlay) = self.overlays.get(&target_wid) {
             unsafe {
-                // Use main cid to query target bounds (cross-process)
                 let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
                     return;
                 }
                 let bw = self.border_width;
@@ -174,10 +173,7 @@ impl BorderMap {
     fn unhide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
             unsafe {
-                let main = SLSMainConnectionID();
-                let mut target_level: i64 = 0;
-                SLSGetWindowLevel(main, target_wid, &mut target_level);
-                SLSSetWindowLevel(o.cid, o.wid, target_level as i32);
+                SLSSetWindowLevel(o.cid, o.wid, 0);
                 SLSOrderWindow(o.cid, o.wid, 1, target_wid);
             }
         }
@@ -205,9 +201,8 @@ impl BorderMap {
     fn redraw(&self, target_wid: u32) {
         if let Some(overlay) = self.overlays.get(&target_wid) {
             unsafe {
-                // Use main cid to query target bounds (cross-process)
                 let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
                     return;
                 }
                 let bw = self.border_width;
@@ -264,13 +259,10 @@ impl BorderMap {
     /// In active-only mode, ensure only the focused overlay is visible.
     fn enforce_active_only(&self) {
         if !self.active_only { return; }
-        let main = unsafe { SLSMainConnectionID() };
         for (&target_wid, o) in &self.overlays {
             if target_wid == self.focused_wid {
                 unsafe {
-                    let mut target_level: i64 = 0;
-                    SLSGetWindowLevel(main, target_wid, &mut target_level);
-                    SLSSetWindowLevel(o.cid, o.wid, target_level as i32);
+                    SLSSetWindowLevel(o.cid, o.wid, 0);
                     SLSOrderWindow(o.cid, o.wid, 1, target_wid);
                 }
             } else {
@@ -293,7 +285,6 @@ fn get_front_window(own_pid: i32) -> u32 {
         SLSGetConnectionIDForPSN(SLSMainConnectionID(), &mut psn, &mut front_cid);
         let mut front_pid: i32 = 0;
         SLSConnectionGetPID(front_cid, &mut front_pid);
-        debug!("[get_front_window] front_pid={front_pid} own_pid={own_pid}");
         if front_pid == 0 || front_pid == own_pid { return 0; }
 
         // Step 2: find the topmost layer-0 window belonging to that process
@@ -806,14 +797,7 @@ fn create_overlay(
 
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
-
-        // Set border to same level as target window, then order above it.
-        // SLSOrderWindow handles the visual stacking within the same level.
-        let main = SLSMainConnectionID();
-        let mut target_level: i64 = 0;
-        SLSGetWindowLevel(main, target_wid, &mut target_level);
-        debug!("[create_overlay] target={target_wid} level={target_level}");
-        SLSSetWindowLevel(cid, wid, target_level as i32);
+        SLSSetWindowLevel(cid, wid, 0);
 
         // Make overlay click-through (bit 1) and disable shadow (bit 9)
         let tags: u64 = (1 << 1) | (1 << 9);
