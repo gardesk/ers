@@ -139,8 +139,9 @@ impl BorderMap {
     fn reposition(&self, target_wid: u32) {
         if let Some(overlay) = self.overlays.get(&target_wid) {
             unsafe {
+                // Use main cid to query target bounds (cross-process)
                 let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
                     return;
                 }
                 let bw = self.border_width;
@@ -204,8 +205,9 @@ impl BorderMap {
     fn redraw(&self, target_wid: u32) {
         if let Some(overlay) = self.overlays.get(&target_wid) {
             unsafe {
+                // Use main cid to query target bounds (cross-process)
                 let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
                     return;
                 }
                 let bw = self.border_width;
@@ -315,8 +317,7 @@ fn get_front_window(own_pid: i32) -> u32 {
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            // Skip menu bar, dock, and other system layers (negative or very high)
-            if layer < 0 || layer > 25 { continue; }
+            if layer != 0 { continue; }
 
             let mut pid: i32 = 0;
             if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
@@ -716,7 +717,7 @@ fn discover_windows(_cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            if layer < 0 || layer > 25 { continue; }
+            if layer != 0 { continue; }
 
             wids.push(wid);
         }
@@ -859,7 +860,7 @@ fn list_windows() {
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            if layer < 0 || layer > 25 || wid == 0 { continue; }
+            if layer != 0 || wid == 0 { continue; }
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(cid, wid, &mut bounds);
