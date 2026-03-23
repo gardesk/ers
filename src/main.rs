@@ -12,10 +12,6 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use tracing::debug;
 
-/// Offset added to target window's level for border overlays.
-/// Ensures borders render above both normal (0) and floating (8) windows.
-const BORDER_LEVEL_OFFSET: i32 = 1;
-
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
     cid: CGSConnectionID,
@@ -180,8 +176,7 @@ impl BorderMap {
                 let main = SLSMainConnectionID();
                 let mut target_level: i64 = 0;
                 SLSGetWindowLevel(main, target_wid, &mut target_level);
-                let level = (target_level as i32).max(0) + BORDER_LEVEL_OFFSET;
-                SLSSetWindowLevel(o.cid, o.wid, level);
+                SLSSetWindowLevel(o.cid, o.wid, target_level as i32);
                 SLSOrderWindow(o.cid, o.wid, 1, target_wid);
             }
         }
@@ -273,8 +268,7 @@ impl BorderMap {
                 unsafe {
                     let mut target_level: i64 = 0;
                     SLSGetWindowLevel(main, target_wid, &mut target_level);
-                    let level = (target_level as i32).max(0) + BORDER_LEVEL_OFFSET;
-                    SLSSetWindowLevel(o.cid, o.wid, level);
+                    SLSSetWindowLevel(o.cid, o.wid, target_level as i32);
                     SLSOrderWindow(o.cid, o.wid, 1, target_wid);
                 }
             } else {
@@ -297,6 +291,7 @@ fn get_front_window(own_pid: i32) -> u32 {
         SLSGetConnectionIDForPSN(SLSMainConnectionID(), &mut psn, &mut front_cid);
         let mut front_pid: i32 = 0;
         SLSConnectionGetPID(front_cid, &mut front_pid);
+        debug!("[get_front_window] front_pid={front_pid} own_pid={own_pid}");
         if front_pid == 0 || front_pid == own_pid { return 0; }
 
         // Step 2: find the topmost layer-0 window belonging to that process
@@ -811,15 +806,13 @@ fn create_overlay(
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
 
-        // Query target window's level (using main cid, not per-border cid)
-        // and place border above it. Ensures borders stay visible on
-        // floating windows (level 8+) and normal tiled windows (level 0).
+        // Set border to same level as target window, then order above it.
+        // SLSOrderWindow handles the visual stacking within the same level.
         let main = SLSMainConnectionID();
         let mut target_level: i64 = 0;
         SLSGetWindowLevel(main, target_wid, &mut target_level);
-        let border_level = (target_level as i32).max(0) + BORDER_LEVEL_OFFSET;
-        debug!("[create_overlay] target={target_wid} level={target_level} border_level={border_level}");
-        SLSSetWindowLevel(cid, wid, border_level);
+        debug!("[create_overlay] target={target_wid} level={target_level}");
+        SLSSetWindowLevel(cid, wid, target_level as i32);
 
         // Make overlay click-through (bit 1) and disable shadow (bit 9)
         let tags: u64 = (1 << 1) | (1 << 9);
