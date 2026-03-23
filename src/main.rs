@@ -12,6 +12,10 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use tracing::debug;
 
+/// Offset added to target window's level for border overlays.
+/// Ensures borders render above both normal (0) and floating (8) windows.
+const BORDER_WINDOW_LEVEL: i32 = 1;
+
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
     cid: CGSConnectionID,
@@ -173,7 +177,10 @@ impl BorderMap {
     fn unhide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
             unsafe {
-                SLSSetWindowLevel(o.cid, o.wid, 0);
+                let mut target_level: i64 = 0;
+                SLSGetWindowLevel(self.main_cid, target_wid, &mut target_level);
+                let level = (target_level as i32).max(0) + BORDER_WINDOW_LEVEL;
+                SLSSetWindowLevel(o.cid, o.wid, level);
                 SLSOrderWindow(o.cid, o.wid, 1, target_wid);
             }
         }
@@ -262,7 +269,10 @@ impl BorderMap {
         for (&target_wid, o) in &self.overlays {
             if target_wid == self.focused_wid {
                 unsafe {
-                    SLSSetWindowLevel(o.cid, o.wid, 0);
+                    let mut target_level: i64 = 0;
+                    SLSGetWindowLevel(self.main_cid, target_wid, &mut target_level);
+                    let level = (target_level as i32).max(0) + BORDER_WINDOW_LEVEL;
+                    SLSSetWindowLevel(o.cid, o.wid, level);
                     SLSOrderWindow(o.cid, o.wid, 1, target_wid);
                 }
             } else {
@@ -797,7 +807,14 @@ fn create_overlay(
 
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
-        SLSSetWindowLevel(cid, wid, 0);
+
+        // Query target window's level and place border above it.
+        // Ensures borders stay visible on floating windows (level 8+)
+        // and normal tiled windows (level 0).
+        let mut target_level: i64 = 0;
+        SLSGetWindowLevel(cid, target_wid, &mut target_level);
+        let border_level = (target_level as i32).max(0) + BORDER_WINDOW_LEVEL;
+        SLSSetWindowLevel(cid, wid, border_level);
 
         // Make overlay click-through (bit 1) and disable shadow (bit 9)
         let tags: u64 = (1 << 1) | (1 << 9);
