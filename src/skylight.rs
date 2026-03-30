@@ -146,21 +146,9 @@ unsafe extern "C" {
         out_cid: *mut CGSConnectionID,
     ) -> CGError;
     pub fn SLSConnectionGetPID(cid: CGSConnectionID, pid: *mut i32) -> CGError;
-    pub fn SLSGetWindowBounds(
-        cid: CGSConnectionID,
-        wid: u32,
-        frame: *mut CGRect,
-    ) -> CGError;
-    pub fn SLSWindowIsOrderedIn(
-        cid: CGSConnectionID,
-        wid: u32,
-        shown: *mut bool,
-    ) -> CGError;
-    pub fn SLSGetWindowLevel(
-        cid: CGSConnectionID,
-        wid: u32,
-        level_out: *mut i64,
-    ) -> CGError;
+    pub fn SLSGetWindowBounds(cid: CGSConnectionID, wid: u32, frame: *mut CGRect) -> CGError;
+    pub fn SLSWindowIsOrderedIn(cid: CGSConnectionID, wid: u32, shown: *mut bool) -> CGError;
+    pub fn SLSGetWindowLevel(cid: CGSConnectionID, wid: u32, level_out: *mut i64) -> CGError;
 
     // Window iterator queries
     pub fn SLSWindowQueryWindows(
@@ -208,48 +196,17 @@ unsafe extern "C" {
         y_offset: f32,
         shape: CFTypeRef,
     ) -> CGError;
-    pub fn SLSSetWindowResolution(
-        cid: CGSConnectionID,
-        wid: u32,
-        res: f64,
-    ) -> CGError;
-    pub fn SLSSetWindowOpacity(
-        cid: CGSConnectionID,
-        wid: u32,
-        is_opaque: bool,
-    ) -> CGError;
-    pub fn SLSSetWindowAlpha(
-        cid: CGSConnectionID,
-        wid: u32,
-        alpha: f32,
-    ) -> CGError;
-    pub fn SLSSetWindowBackgroundBlurRadius(
-        cid: CGSConnectionID,
-        wid: u32,
-        radius: u32,
-    ) -> CGError;
-    pub fn SLSSetWindowLevel(
-        cid: CGSConnectionID,
-        wid: u32,
-        level: i32,
-    ) -> CGError;
-    pub fn SLSOrderWindow(
-        cid: CGSConnectionID,
-        wid: u32,
-        mode: i32,
-        relative_to: u32,
-    ) -> CGError;
-    pub fn SLSMoveWindow(
-        cid: CGSConnectionID,
-        wid: u32,
-        point: *const CGPoint,
-    ) -> CGError;
+    pub fn SLSSetWindowResolution(cid: CGSConnectionID, wid: u32, res: f64) -> CGError;
+    pub fn SLSSetWindowOpacity(cid: CGSConnectionID, wid: u32, is_opaque: bool) -> CGError;
+    pub fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
+    pub fn SLSSetWindowBackgroundBlurRadius(cid: CGSConnectionID, wid: u32, radius: u32)
+    -> CGError;
+    pub fn SLSSetWindowLevel(cid: CGSConnectionID, wid: u32, level: i32) -> CGError;
+    pub fn SLSOrderWindow(cid: CGSConnectionID, wid: u32, mode: i32, relative_to: u32) -> CGError;
+    pub fn SLSMoveWindow(cid: CGSConnectionID, wid: u32, point: *const CGPoint) -> CGError;
 
     // Shadow
-    pub fn SLSWindowSetShadowProperties(
-        wid: u32,
-        properties: CFDictionaryRef,
-    ) -> CGError;
+    pub fn SLSWindowSetShadowProperties(wid: u32, properties: CFDictionaryRef) -> CGError;
 
     // Drawing context
     pub fn SLWindowContextCreate(
@@ -260,11 +217,7 @@ unsafe extern "C" {
 
     // Transactions
     pub fn SLSTransactionCreate(cid: CGSConnectionID) -> CFTypeRef;
-    pub fn SLSTransactionSetWindowLevel(
-        transaction: CFTypeRef,
-        wid: u32,
-        level: i32,
-    ) -> CGError;
+    pub fn SLSTransactionSetWindowLevel(transaction: CFTypeRef, wid: u32, level: i32) -> CGError;
     pub fn SLSTransactionMoveWindowWithGroup(
         transaction: CFTypeRef,
         wid: u32,
@@ -276,11 +229,7 @@ unsafe extern "C" {
         order: i32,
         rel_wid: u32,
     ) -> CGError;
-    pub fn SLSTransactionSetWindowAlpha(
-        transaction: CFTypeRef,
-        wid: u32,
-        alpha: f32,
-    ) -> CGError;
+    pub fn SLSTransactionSetWindowAlpha(transaction: CFTypeRef, wid: u32, alpha: f32) -> CGError;
     pub fn SLSTransactionSetWindowTransform(
         transaction: CFTypeRef,
         wid: u32,
@@ -314,14 +263,8 @@ unsafe extern "C" {
     ) -> CFArrayRef;
     pub fn SLSCopyManagedDisplays(cid: CGSConnectionID) -> CFArrayRef;
     pub fn SLSCopyManagedDisplaySpaces(cid: CGSConnectionID) -> CFArrayRef;
-    pub fn SLSCopyManagedDisplayForWindow(
-        cid: CGSConnectionID,
-        wid: u32,
-    ) -> CFStringRef;
-    pub fn SLSManagedDisplayGetCurrentSpace(
-        cid: CGSConnectionID,
-        uuid: CFStringRef,
-    ) -> u64;
+    pub fn SLSCopyManagedDisplayForWindow(cid: CGSConnectionID, wid: u32) -> CFStringRef;
+    pub fn SLSManagedDisplayGetCurrentSpace(cid: CGSConnectionID, uuid: CFStringRef) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: CGSConnectionID) -> CFStringRef;
     pub fn SLSMoveWindowsToManagedSpace(
         cid: CGSConnectionID,
@@ -378,20 +321,8 @@ pub const kCFStringEncodingUTF8: u32 = 0x0800_0100;
 // --- CoreGraphics drawing ---
 
 unsafe extern "C" {
-    pub fn CGContextSetRGBStrokeColor(
-        ctx: CGContextRef,
-        r: f64,
-        g: f64,
-        b: f64,
-        a: f64,
-    );
-    pub fn CGContextSetRGBFillColor(
-        ctx: CGContextRef,
-        r: f64,
-        g: f64,
-        b: f64,
-        a: f64,
-    );
+    pub fn CGContextSetRGBStrokeColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
+    pub fn CGContextSetRGBFillColor(ctx: CGContextRef, r: f64, g: f64, b: f64, a: f64);
     pub fn CGContextSetLineWidth(ctx: CGContextRef, width: f64);
     pub fn CGContextClearRect(ctx: CGContextRef, rect: CGRect);
     pub fn CGContextEOFillPath(ctx: CGContextRef);
@@ -419,11 +350,7 @@ unsafe extern "C" {
         rx: f64,
         ry: f64,
     );
-    pub fn CGPathAddRect(
-        path: CGMutablePathRef,
-        transform: *const CGAffineTransform,
-        rect: CGRect,
-    );
+    pub fn CGPathAddRect(path: CGMutablePathRef, transform: *const CGAffineTransform, rect: CGRect);
     pub fn CGPathAddPath(
         path: CGMutablePathRef,
         transform: *const CGAffineTransform,
@@ -452,11 +379,7 @@ unsafe extern "C" {
         the_type: i32,
         value_ptr: *const c_void,
     ) -> CFNumberRef;
-    pub fn CFNumberGetValue(
-        number: CFNumberRef,
-        the_type: i32,
-        value_ptr: *mut c_void,
-    ) -> bool;
+    pub fn CFNumberGetValue(number: CFNumberRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     pub fn CFNumberGetType(number: CFNumberRef) -> i32;
 
     pub fn CFDictionaryCreate(
@@ -510,7 +433,12 @@ pub fn mach_task_self() -> u32 {
 
 // --- Helper: create CFArray of CFNumbers ---
 
-pub unsafe fn cfarray_of_cfnumbers(values: *const c_void, size: usize, count: i32, num_type: i32) -> CFArrayRef {
+pub unsafe fn cfarray_of_cfnumbers(
+    values: *const c_void,
+    size: usize,
+    count: i32,
+    num_type: i32,
+) -> CFArrayRef {
     unsafe {
         let mut temp: Vec<CFNumberRef> = Vec::with_capacity(count as usize);
         for i in 0..count {

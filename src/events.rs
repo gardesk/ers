@@ -64,7 +64,9 @@ unsafe extern "C" fn window_handler(
     unsafe {
         let wid = std::ptr::read_unaligned(data as *const u32);
         let cid = context as isize as CGSConnectionID;
-        if wid == 0 || is_own_window(cid, wid) { return; }
+        if wid == 0 || is_own_window(cid, wid) {
+            return;
+        }
 
         match event {
             EVENT_WINDOW_MOVE => send(Event::Move(wid)),
@@ -91,7 +93,9 @@ unsafe extern "C" fn spawn_handler(
         let _sid = std::ptr::read_unaligned(data as *const u64);
         let wid = std::ptr::read_unaligned(data.add(8) as *const u32);
         let cid = context as isize as CGSConnectionID;
-        if wid == 0 || is_own_window(cid, wid) { return; }
+        if wid == 0 || is_own_window(cid, wid) {
+            return;
+        }
 
         match event {
             EVENT_WINDOW_CREATE => send(Event::Create(wid)),
@@ -102,13 +106,19 @@ unsafe extern "C" fn spawn_handler(
 }
 
 unsafe extern "C" fn space_handler(
-    _event: u32, _data: *const u8, _len: usize, _ctx: *mut std::ffi::c_void,
+    _event: u32,
+    _data: *const u8,
+    _len: usize,
+    _ctx: *mut std::ffi::c_void,
 ) {
     send(Event::SpaceChange);
 }
 
 unsafe extern "C" fn front_handler(
-    _event: u32, _data: *const u8, _len: usize, _ctx: *mut std::ffi::c_void,
+    _event: u32,
+    _data: *const u8,
+    _len: usize,
+    _ctx: *mut std::ffi::c_void,
 ) {
     send(Event::FrontChange);
 }
@@ -116,8 +126,14 @@ unsafe extern "C" fn front_handler(
 pub fn register(cid: CGSConnectionID) {
     let ctx = cid as isize as *mut std::ffi::c_void;
     unsafe {
-        for &ev in &[EVENT_WINDOW_CLOSE, EVENT_WINDOW_MOVE, EVENT_WINDOW_RESIZE,
-                     EVENT_WINDOW_REORDER, EVENT_WINDOW_HIDE, EVENT_WINDOW_UNHIDE] {
+        for &ev in &[
+            EVENT_WINDOW_CLOSE,
+            EVENT_WINDOW_MOVE,
+            EVENT_WINDOW_RESIZE,
+            EVENT_WINDOW_REORDER,
+            EVENT_WINDOW_HIDE,
+            EVENT_WINDOW_UNHIDE,
+        ] {
             SLSRegisterNotifyProc(window_handler as *const _, ev, ctx);
         }
         SLSRegisterNotifyProc(spawn_handler as *const _, EVENT_WINDOW_CREATE, ctx);
