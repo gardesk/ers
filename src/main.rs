@@ -7,15 +7,34 @@ use events::Event;
 use skylight::*;
 use std::collections::HashMap;
 use std::ptr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use tracing::debug;
 
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
     cid: CGSConnectionID,
     wid: u32,
+}
+
+fn window_area(bounds: CGRect) -> f64 {
+    bounds.size.width * bounds.size.height
+}
+
+fn intersection_area(a: CGRect, b: CGRect) -> f64 {
+    let left = a.origin.x.max(b.origin.x);
+    let top = a.origin.y.max(b.origin.y);
+    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let bottom = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    let width = (right - left).max(0.0);
+    let height = (bottom - top).max(0.0);
+    width * height
+}
+
+fn is_same_window_surface(a: CGRect, b: CGRect) -> bool {
+    let smaller = window_area(a).min(window_area(b));
+    smaller > 0.0 && intersection_area(a, b) / smaller >= 0.9
 }
 
 /// Tracks overlays for target windows.
@@ -41,13 +60,17 @@ impl BorderMap {
             radius: 10.0,
             focused_wid: 0,
             active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
-            inactive_color: (0.35, 0.35, 0.35, 0.8),  // dim gray
+            inactive_color: (0.35, 0.35, 0.35, 0.8), // dim gray
             active_only: false,
         }
     }
 
     fn color_for(&self, target_wid: u32) -> (f64, f64, f64, f64) {
-        if target_wid == self.focused_wid { self.active_color } else { self.inactive_color }
+        if target_wid == self.focused_wid {
+            self.active_color
+        } else {
+            self.inactive_color
+        }
     }
 
     fn is_overlay(&self, wid: u32) -> bool {
@@ -56,9 +79,17 @@ impl BorderMap {
 
     /// Add border (batch mode, uses main cid).
     fn add_batch(&mut self, target_wid: u32) {
-        if self.overlays.contains_key(&target_wid) { return; }
+        if self.overlays.contains_key(&target_wid) {
+            return;
+        }
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, self.radius, color) {
+        if let Some((cid, wid)) = create_overlay(
+            self.main_cid,
+            target_wid,
+            self.border_width,
+            self.radius,
+            color,
+        ) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
@@ -66,23 +97,31 @@ impl BorderMap {
     /// Add border (event mode). Uses main_cid — fresh connections create
     /// invisible windows on Tahoe.
     fn add_fresh(&mut self, target_wid: u32) {
-        if self.overlays.contains_key(&target_wid) { return; }
+        if self.overlays.contains_key(&target_wid) {
+            return;
+        }
 
         // Filter: must be visible, owned by another process, not tiny
         let bounds = unsafe {
             let mut shown = false;
             SLSWindowIsOrderedIn(self.main_cid, target_wid, &mut shown);
-            if !shown { return; }
+            if !shown {
+                return;
+            }
 
             let mut wid_cid: CGSConnectionID = 0;
             SLSGetWindowOwner(self.main_cid, target_wid, &mut wid_cid);
             let mut pid: i32 = 0;
             SLSConnectionGetPID(wid_cid, &mut pid);
-            if pid == self.own_pid { return; }
+            if pid == self.own_pid {
+                return;
+            }
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
-            if bounds.size.width < 50.0 || bounds.size.height < 50.0 { return; }
+            if bounds.size.width < 50.0 || bounds.size.height < 50.0 {
+                return;
+            }
             bounds
         };
 
@@ -90,7 +129,7 @@ impl BorderMap {
         // keep the smaller one (content) and skip the larger one (container)
         let cx = bounds.origin.x + bounds.size.width / 2.0;
         let cy = bounds.origin.y + bounds.size.height / 2.0;
-        let area = bounds.size.width * bounds.size.height;
+        let area = window_area(bounds);
         for &existing_wid in self.overlays.keys() {
             unsafe {
                 let mut eb = CGRect::default();
@@ -100,14 +139,22 @@ impl BorderMap {
                 let ecx = eb.origin.x + eb.size.width / 2.0;
                 let ecy = eb.origin.y + eb.size.height / 2.0;
                 if (cx - ecx).abs() < 30.0 && (cy - ecy).abs() < 30.0 {
-                    let earea = eb.size.width * eb.size.height;
-                    if area >= earea { return; } // new window is container, skip
+                    let earea = window_area(eb);
+                    if area >= earea {
+                        return;
+                    } // new window is container, skip
                 }
             }
         }
 
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(self.main_cid, target_wid, self.border_width, self.radius, color) {
+        if let Some((cid, wid)) = create_overlay(
+            self.main_cid,
+            target_wid,
+            self.border_width,
+            self.radius,
+            color,
+        ) {
             self.overlays.insert(target_wid, Overlay { cid, wid });
         }
     }
@@ -123,7 +170,10 @@ impl BorderMap {
         if let Some(overlay) = self.overlays.remove(&target_wid) {
             unsafe {
                 // Move off-screen first (most reliable hide on Tahoe)
-                let offscreen = CGPoint { x: -99999.0, y: -99999.0 };
+                let offscreen = CGPoint {
+                    x: -99999.0,
+                    y: -99999.0,
+                };
                 SLSMoveWindow(overlay.cid, overlay.wid, &offscreen);
                 SLSSetWindowAlpha(overlay.cid, overlay.wid, 0.0);
                 SLSOrderWindow(overlay.cid, overlay.wid, 0, 0);
@@ -155,7 +205,9 @@ impl BorderMap {
 
     /// Recreate overlay at new size.
     fn recreate(&mut self, target_wid: u32) {
-        if !self.overlays.contains_key(&target_wid) { return; }
+        if !self.overlays.contains_key(&target_wid) {
+            return;
+        }
         self.remove(target_wid);
         self.add_fresh(target_wid);
         if self.active_only && target_wid != self.focused_wid {
@@ -166,7 +218,9 @@ impl BorderMap {
 
     fn hide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
-            unsafe { SLSOrderWindow(o.cid, o.wid, 0, 0); }
+            unsafe {
+                SLSOrderWindow(o.cid, o.wid, 0, 0);
+            }
         }
     }
 
@@ -187,7 +241,9 @@ impl BorderMap {
 
     fn subscribe_all(&self) {
         let target_wids: Vec<u32> = self.overlays.keys().copied().collect();
-        if target_wids.is_empty() { return; }
+        if target_wids.is_empty() {
+            return;
+        }
         unsafe {
             SLSRequestNotificationsForWindows(
                 self.main_cid,
@@ -210,7 +266,9 @@ impl BorderMap {
                 let oh = bounds.size.height + 2.0 * bw;
 
                 let ctx = SLWindowContextCreate(overlay.cid, overlay.wid, ptr::null());
-                if ctx.is_null() { return; }
+                if ctx.is_null() {
+                    return;
+                }
 
                 let color = self.color_for(target_wid);
                 draw_border(ctx, ow, oh, bw, self.radius, color);
@@ -223,7 +281,9 @@ impl BorderMap {
     /// Detect focused window and update border colors if focus changed.
     fn update_focus(&mut self) {
         let front = get_front_window(self.own_pid);
-        if front == 0 || front == self.focused_wid { return; }
+        if front == 0 || front == self.focused_wid {
+            return;
+        }
 
         let old = self.focused_wid;
         self.focused_wid = front;
@@ -258,7 +318,9 @@ impl BorderMap {
 
     /// In active-only mode, ensure only the focused overlay is visible.
     fn enforce_active_only(&self) {
-        if !self.active_only { return; }
+        if !self.active_only {
+            return;
+        }
         for (&target_wid, o) in &self.overlays {
             if target_wid == self.focused_wid {
                 unsafe {
@@ -266,7 +328,9 @@ impl BorderMap {
                     SLSOrderWindow(o.cid, o.wid, 1, target_wid);
                 }
             } else {
-                unsafe { SLSOrderWindow(o.cid, o.wid, 0, 0); }
+                unsafe {
+                    SLSOrderWindow(o.cid, o.wid, 0, 0);
+                }
             }
         }
     }
@@ -285,22 +349,42 @@ fn get_front_window(own_pid: i32) -> u32 {
         SLSGetConnectionIDForPSN(SLSMainConnectionID(), &mut psn, &mut front_cid);
         let mut front_pid: i32 = 0;
         SLSConnectionGetPID(front_cid, &mut front_pid);
-        if front_pid == 0 || front_pid == own_pid { return 0; }
+        if front_pid == 0 || front_pid == own_pid {
+            return 0;
+        }
 
         // Step 2: find the topmost layer-0 window belonging to that process
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-        if list.is_null() { return 0; }
+        if list.is_null() {
+            return 0;
+        }
 
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
-        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
-        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
+        let wid_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowNumber\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let pid_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowOwnerPID\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let layer_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowLayer\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
 
         let mut front_wid: u32 = 0;
+        let mut front_bounds = CGRect::default();
+        let mut have_front_bounds = false;
         let mut fallback_wid: u32 = 0;
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
-            if dict.is_null() { continue; }
+            if dict.is_null() {
+                continue;
+            }
 
             let mut v: CFTypeRef = ptr::null();
 
@@ -308,29 +392,58 @@ fn get_front_window(own_pid: i32) -> u32 {
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            if layer != 0 { continue; }
+            if layer != 0 {
+                continue;
+            }
 
             let mut pid: i32 = 0;
             if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
             }
-            if pid == own_pid { continue; }
+            if pid == own_pid {
+                continue;
+            }
 
             let mut wid: u32 = 0;
             if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
             }
-            if wid == 0 { continue; }
+            if wid == 0 {
+                continue;
+            }
 
             // Track first non-self window as fallback (z-order based)
             if fallback_wid == 0 {
                 fallback_wid = wid;
             }
 
-            // Prefer a window from the front process
+            // Prefer a window from the front process. If another layer-0 surface
+            // from that app nearly fully contains the current one, treat the
+            // larger surface as the real window. Firefox can surface a tab-strip
+            // child ahead of the outer window after a tile.
             if pid == front_pid {
-                front_wid = wid;
-                break;
+                let mut bounds = CGRect::default();
+                if SLSGetWindowBounds(SLSMainConnectionID(), wid, &mut bounds) != kCGErrorSuccess {
+                    if front_wid == 0 {
+                        front_wid = wid;
+                    }
+                    continue;
+                }
+
+                if front_wid == 0 {
+                    front_wid = wid;
+                    front_bounds = bounds;
+                    have_front_bounds = true;
+                    continue;
+                }
+
+                if have_front_bounds
+                    && is_same_window_surface(front_bounds, bounds)
+                    && window_area(bounds) > window_area(front_bounds)
+                {
+                    front_wid = wid;
+                    front_bounds = bounds;
+                }
             }
         }
 
@@ -351,13 +464,17 @@ fn get_front_window(own_pid: i32) -> u32 {
 /// Parse hex color string (#RRGGBB or #RRGGBBAA) to (r, g, b, a) floats.
 fn parse_color(s: &str) -> Option<(f64, f64, f64, f64)> {
     let hex = s.strip_prefix('#').unwrap_or(s);
-    if hex.len() != 6 && hex.len() != 8 { return None; }
+    if hex.len() != 6 && hex.len() != 8 {
+        return None;
+    }
     let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f64 / 255.0;
     let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f64 / 255.0;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f64 / 255.0;
     let a = if hex.len() == 8 {
         u8::from_str_radix(&hex[6..8], 16).ok()? as f64 / 255.0
-    } else { 1.0 };
+    } else {
+        1.0
+    };
     Some((r, g, b, a))
 }
 
@@ -454,7 +571,9 @@ fn main() {
 
     if borders.active_only {
         let focused = borders.focused_wid;
-        let to_hide: Vec<u32> = borders.overlays.keys()
+        let to_hide: Vec<u32> = borders
+            .overlays
+            .keys()
             .filter(|&&wid| wid != focused)
             .copied()
             .collect();
@@ -554,9 +673,11 @@ fn main() {
 
             // Promote pending creates that have waited ≥100ms (tarmac positioning time)
             let now = Instant::now();
-            let ready: Vec<u32> = pending.iter()
+            let ready: Vec<u32> = pending
+                .iter()
                 .filter(|(wid, seen_at)| {
-                    !destroyed.contains(wid) && now.duration_since(**seen_at) >= Duration::from_millis(100)
+                    !destroyed.contains(wid)
+                        && now.duration_since(**seen_at) >= Duration::from_millis(100)
                 })
                 .map(|(wid, _)| *wid)
                 .collect();
@@ -573,7 +694,7 @@ fn main() {
             // If two new windows overlap closely, skip the larger one (container)
             let mut skip: std::collections::HashSet<u32> = HashSet::new();
             for i in 0..bounds_map.len() {
-                for j in (i+1)..bounds_map.len() {
+                for j in (i + 1)..bounds_map.len() {
                     let (wid_a, a) = &bounds_map[i];
                     let (wid_b, b) = &bounds_map[j];
                     // Check if centers are close (within 30px)
@@ -583,8 +704,8 @@ fn main() {
                     let cy_b = b.origin.y + b.size.height / 2.0;
                     if (cx_a - cx_b).abs() < 30.0 && (cy_a - cy_b).abs() < 30.0 {
                         // Skip the larger one
-                        let area_a = a.size.width * a.size.height;
-                        let area_b = b.size.width * b.size.height;
+                        let area_a = window_area(*a);
+                        let area_b = window_area(*b);
                         if area_a > area_b {
                             skip.insert(*wid_a);
                         } else {
@@ -652,9 +773,19 @@ fn main() {
 fn setup_event_port(cid: CGSConnectionID) {
     unsafe {
         let mut port: u32 = 0;
-        if SLSGetEventPort(cid, &mut port) != kCGErrorSuccess { return; }
-        let cf_port = CFMachPortCreateWithPort(ptr::null(), port, drain_events as *const _, ptr::null(), false);
-        if cf_port.is_null() { return; }
+        if SLSGetEventPort(cid, &mut port) != kCGErrorSuccess {
+            return;
+        }
+        let cf_port = CFMachPortCreateWithPort(
+            ptr::null(),
+            port,
+            drain_events as *const _,
+            ptr::null(),
+            false,
+        );
+        if cf_port.is_null() {
+            return;
+        }
         _CFMachPortSetOptions(cf_port, 0x40);
         let source = CFMachPortCreateRunLoopSource(ptr::null(), cf_port, 0);
         if !source.is_null() {
@@ -665,7 +796,12 @@ fn setup_event_port(cid: CGSConnectionID) {
     }
 }
 
-unsafe extern "C" fn drain_events(_: CFMachPortRef, _: *mut std::ffi::c_void, _: i64, _: *mut std::ffi::c_void) {
+unsafe extern "C" fn drain_events(
+    _: CFMachPortRef,
+    _: *mut std::ffi::c_void,
+    _: i64,
+    _: *mut std::ffi::c_void,
+) {
     unsafe {
         let cid = SLSMainConnectionID();
         let mut ev = SLEventCreateNextEvent(cid);
@@ -679,36 +815,58 @@ unsafe extern "C" fn drain_events(_: CFMachPortRef, _: *mut std::ffi::c_void, _:
 fn discover_windows(_cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-        if list.is_null() { return vec![]; }
+        if list.is_null() {
+            return vec![];
+        }
 
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
-        let pid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowOwnerPID\0".as_ptr(), kCFStringEncodingUTF8);
-        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
+        let wid_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowNumber\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let pid_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowOwnerPID\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let layer_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowLayer\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
 
         let mut wids = Vec::new();
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
-            if dict.is_null() { continue; }
+            if dict.is_null() {
+                continue;
+            }
 
             let mut v: CFTypeRef = ptr::null();
             let mut wid: u32 = 0;
             if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
             }
-            if wid == 0 { continue; }
+            if wid == 0 {
+                continue;
+            }
 
             let mut pid: i32 = 0;
             if CFDictionaryGetValueIfPresent(dict, pid_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
             }
-            if pid == own_pid { continue; }
+            if pid == own_pid {
+                continue;
+            }
 
             let mut layer: i32 = -1;
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            if layer != 0 { continue; }
+            if layer != 0 {
+                continue;
+            }
 
             wids.push(wid);
         }
@@ -766,7 +924,10 @@ fn create_overlay(
             return None;
         }
         if bounds.size.width < 10.0 || bounds.size.height < 10.0 {
-            debug!("[create_overlay] wid={target_wid} too small: {}x{}", bounds.size.width, bounds.size.height);
+            debug!(
+                "[create_overlay] wid={target_wid} too small: {}x{}",
+                bounds.size.width, bounds.size.height
+            );
             return None;
         }
 
@@ -792,8 +953,10 @@ fn create_overlay(
             return None;
         }
 
-        debug!("[create_overlay] created overlay wid={wid} for target={target_wid} color=({:.2},{:.2},{:.2},{:.2})",
-            color.0, color.1, color.2, color.3);
+        debug!(
+            "[create_overlay] created overlay wid={wid} for target={target_wid} color=({:.2},{:.2},{:.2},{:.2})",
+            color.0, color.1, color.2, color.3
+        );
 
         SLSSetWindowResolution(cid, wid, 2.0);
         SLSSetWindowOpacity(cid, wid, false);
@@ -820,15 +983,30 @@ fn list_windows() {
     let cid = unsafe { SLSMainConnectionID() };
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
-        if list.is_null() { return; }
+        if list.is_null() {
+            return;
+        }
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowNumber\0".as_ptr(), kCFStringEncodingUTF8);
-        let layer_key = CFStringCreateWithCString(ptr::null(), b"kCGWindowLayer\0".as_ptr(), kCFStringEncodingUTF8);
+        let wid_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowNumber\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
+        let layer_key = CFStringCreateWithCString(
+            ptr::null(),
+            b"kCGWindowLayer\0".as_ptr(),
+            kCFStringEncodingUTF8,
+        );
 
-        eprintln!("{:>6}  {:>8}  {:>8}  {:>6}  {:>6}", "wid", "x", "y", "w", "h");
+        eprintln!(
+            "{:>6}  {:>8}  {:>8}  {:>6}  {:>6}",
+            "wid", "x", "y", "w", "h"
+        );
         for i in 0..count {
             let dict = CFArrayGetValueAtIndex(list, i);
-            if dict.is_null() { continue; }
+            if dict.is_null() {
+                continue;
+            }
 
             let mut v: CFTypeRef = ptr::null();
             let mut wid: u32 = 0;
@@ -839,12 +1017,16 @@ fn list_windows() {
             if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
             }
-            if layer != 0 || wid == 0 { continue; }
+            if layer != 0 || wid == 0 {
+                continue;
+            }
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(cid, wid, &mut bounds);
-            eprintln!("{wid:>6}  {:>8.0}  {:>8.0}  {:>6.0}  {:>6.0}",
-                bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height);
+            eprintln!(
+                "{wid:>6}  {:>8.0}  {:>8.0}  {:>6.0}  {:>6.0}",
+                bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
+            );
         }
         CFRelease(wid_key as CFTypeRef);
         CFRelease(layer_key as CFTypeRef);
@@ -852,3 +1034,28 @@ fn list_windows() {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{CGRect, intersection_area, is_same_window_surface};
+
+    #[test]
+    fn same_surface_detects_contained_strip() {
+        let outer = CGRect::new(100.0, 100.0, 1200.0, 900.0);
+        let strip = CGRect::new(114.0, 105.0, 1160.0, 140.0);
+        assert!(is_same_window_surface(outer, strip));
+    }
+
+    #[test]
+    fn different_windows_are_not_treated_as_one_surface() {
+        let a = CGRect::new(100.0, 100.0, 1200.0, 900.0);
+        let b = CGRect::new(300.0, 300.0, 1160.0, 140.0);
+        assert!(!is_same_window_surface(a, b));
+    }
+
+    #[test]
+    fn intersection_area_is_zero_without_overlap() {
+        let a = CGRect::new(100.0, 100.0, 200.0, 200.0);
+        let b = CGRect::new(400.0, 400.0, 200.0, 200.0);
+        assert_eq!(intersection_area(a, b), 0.0);
+    }
+}
