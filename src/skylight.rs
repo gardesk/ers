@@ -411,6 +411,7 @@ unsafe extern "C" {
     pub fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     pub fn CFRunLoopRun();
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
+    pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
 
     pub static kCFAllocatorDefault: CFAllocatorRef;
     pub static kCFTypeDictionaryKeyCallBacks: c_void;
@@ -449,7 +450,7 @@ pub unsafe fn cfarray_of_cfnumbers(
             std::ptr::null(),
             temp.as_ptr() as *const CFTypeRef,
             count as i64,
-            &kCFTypeArrayCallBacks as *const _ as *const c_void,
+            &kCFTypeArrayCallBacks as *const _,
         );
         for n in &temp {
             CFRelease(*n);

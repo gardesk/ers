@@ -1,6 +1,8 @@
 //! SLS event registration and dispatch.
 
 use crate::skylight::*;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc;
 
 pub const EVENT_WINDOW_CLOSE: u32 = 804;
@@ -27,21 +29,17 @@ pub enum Event {
     FrontChange,
 }
 
-static mut TX: Option<mpsc::Sender<Event>> = None;
-static mut OWN_PID: i32 = 0;
+static TX: OnceLock<mpsc::Sender<Event>> = OnceLock::new();
+static OWN_PID: AtomicI32 = AtomicI32::new(0);
 
 pub fn init(tx: mpsc::Sender<Event>, own_pid: i32) {
-    unsafe {
-        TX = Some(tx);
-        OWN_PID = own_pid;
-    }
+    let _ = TX.set(tx);
+    OWN_PID.store(own_pid, Ordering::Relaxed);
 }
 
 fn send(event: Event) {
-    unsafe {
-        if let Some(ref tx) = TX {
-            let _ = tx.send(event);
-        }
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(event);
     }
 }
 
@@ -51,7 +49,7 @@ fn is_own_window(cid: CGSConnectionID, wid: u32) -> bool {
         SLSGetWindowOwner(cid, wid, &mut wid_cid);
         let mut pid: i32 = 0;
         SLSConnectionGetPID(wid_cid, &mut pid);
-        pid == OWN_PID
+        pid == OWN_PID.load(Ordering::Relaxed)
     }
 }
 

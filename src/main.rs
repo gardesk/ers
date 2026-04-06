@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use tracing::debug;
 
+static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
     cid: CGSConnectionID,
@@ -35,6 +37,14 @@ fn intersection_area(a: CGRect, b: CGRect) -> f64 {
 fn is_same_window_surface(a: CGRect, b: CGRect) -> bool {
     let smaller = window_area(a).min(window_area(b));
     smaller > 0.0 && intersection_area(a, b) / smaller >= 0.9
+}
+
+fn cf_string_from_static(name: &std::ffi::CStr) -> CFStringRef {
+    unsafe { CFStringCreateWithCString(ptr::null(), name.as_ptr().cast(), kCFStringEncodingUTF8) }
+}
+
+unsafe extern "C" fn handle_sigint(_: libc::c_int) {
+    SIGNAL_STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
 /// Tracks overlays for target windows.
@@ -360,21 +370,9 @@ fn get_front_window(own_pid: i32) -> u32 {
         }
 
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowNumber\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
-        let pid_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowOwnerPID\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
-        let layer_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowLayer\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
+        let wid_key = cf_string_from_static(c"kCGWindowNumber");
+        let pid_key = cf_string_from_static(c"kCGWindowOwnerPID");
+        let layer_key = cf_string_from_static(c"kCGWindowLayer");
 
         let mut front_wid: u32 = 0;
         let mut front_bounds = CGRect::default();
@@ -584,17 +582,34 @@ fn main() {
 
     debug!("{} overlays tracked", borders.overlays.len());
 
-    // SIGINT flag — background thread checks this to clean up
+    SIGNAL_STOP_REQUESTED.store(false, Ordering::Relaxed);
+
+    // Background watcher translates the signal-safe atomic into a normal
+    // CoreFoundation shutdown request on a Rust thread.
     let running = Arc::new(AtomicBool::new(true));
+    let signal_watcher = std::thread::spawn(|| {
+        use std::time::Duration;
+
+        while !SIGNAL_STOP_REQUESTED.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        unsafe {
+            let run_loop = CFRunLoopGetMain();
+            CFRunLoopStop(run_loop);
+            CFRunLoopWakeUp(run_loop);
+        }
+    });
+
     unsafe {
-        libc::signal(libc::SIGINT, {
-            unsafe extern "C" fn handler(_: libc::c_int) {
-                unsafe {
-                    CFRunLoopStop(CFRunLoopGetMain());
-                }
-            }
-            handler as *const () as libc::sighandler_t
-        });
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
     }
 
     // Process events on background thread with coalescing
@@ -767,6 +782,8 @@ fn main() {
 
     // SIGINT received — signal background thread to stop and wait
     running.store(false, Ordering::Relaxed);
+    SIGNAL_STOP_REQUESTED.store(true, Ordering::Relaxed);
+    let _ = signal_watcher.join();
     let _ = handle.join();
 }
 
@@ -820,21 +837,9 @@ fn discover_windows(_cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
         }
 
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowNumber\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
-        let pid_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowOwnerPID\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
-        let layer_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowLayer\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
+        let wid_key = cf_string_from_static(c"kCGWindowNumber");
+        let pid_key = cf_string_from_static(c"kCGWindowOwnerPID");
+        let layer_key = cf_string_from_static(c"kCGWindowLayer");
 
         let mut wids = Vec::new();
         for i in 0..count {
@@ -987,16 +992,8 @@ fn list_windows() {
             return;
         }
         let count = CFArrayGetCount(list);
-        let wid_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowNumber\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
-        let layer_key = CFStringCreateWithCString(
-            ptr::null(),
-            b"kCGWindowLayer\0".as_ptr(),
-            kCFStringEncodingUTF8,
-        );
+        let wid_key = cf_string_from_static(c"kCGWindowNumber");
+        let layer_key = cf_string_from_static(c"kCGWindowLayer");
 
         eprintln!(
             "{:>6}  {:>8}  {:>8}  {:>6}  {:>6}",
