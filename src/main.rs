@@ -16,6 +16,13 @@ static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const MIN_TRACKED_WINDOW_SIZE: f64 = 4.0;
 const GEOMETRY_EPSILON: f64 = 0.5;
 const SCALE_EPSILON: f64 = 0.01;
+const WINDOW_ATTRIBUTE_REAL: u64 = 1 << 1;
+const WINDOW_TAG_DOCUMENT: u64 = 1 << 0;
+const WINDOW_TAG_FLOATING: u64 = 1 << 1;
+const WINDOW_TAG_ATTACHED: u64 = 1 << 7;
+const WINDOW_TAG_IGNORES_CYCLE: u64 = 1 << 18;
+const WINDOW_TAG_MODAL: u64 = 1 << 31;
+const WINDOW_TAG_REAL_SURFACE: u64 = 1 << 58;
 
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
@@ -50,6 +57,13 @@ enum SurfacePreference {
     ReplaceExisting,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowMetadata {
+    parent_wid: u32,
+    tags: u64,
+    attributes: u64,
+}
+
 fn surface_preference(existing: CGRect, candidate: CGRect) -> Option<SurfacePreference> {
     if !is_same_window_surface(existing, candidate) {
         return None;
@@ -79,6 +93,72 @@ fn origin_changed(a: CGRect, b: CGRect) -> bool {
 fn size_changed(a: CGRect, b: CGRect) -> bool {
     (a.size.width - b.size.width).abs() > GEOMETRY_EPSILON
         || (a.size.height - b.size.height).abs() > GEOMETRY_EPSILON
+}
+
+fn is_suitable_window_metadata(metadata: WindowMetadata) -> bool {
+    metadata.parent_wid == 0
+        && ((metadata.attributes & WINDOW_ATTRIBUTE_REAL) != 0
+            || (metadata.tags & WINDOW_TAG_REAL_SURFACE) != 0)
+        && (metadata.tags & WINDOW_TAG_ATTACHED) == 0
+        && (metadata.tags & WINDOW_TAG_IGNORES_CYCLE) == 0
+        && ((metadata.tags & WINDOW_TAG_DOCUMENT) != 0
+            || ((metadata.tags & WINDOW_TAG_FLOATING) != 0
+                && (metadata.tags & WINDOW_TAG_MODAL) != 0))
+}
+
+fn query_window_metadata(cid: CGSConnectionID, wid: u32) -> Option<WindowMetadata> {
+    unsafe {
+        let window_ref = cfarray_of_cfnumbers(
+            (&wid as *const u32).cast(),
+            std::mem::size_of::<u32>(),
+            1,
+            kCFNumberSInt32Type,
+        );
+        if window_ref.is_null() {
+            return None;
+        }
+
+        let query = SLSWindowQueryWindows(cid, window_ref, 0x0);
+        CFRelease(window_ref);
+        if query.is_null() {
+            return None;
+        }
+
+        let iterator = SLSWindowQueryResultCopyWindows(query);
+        CFRelease(query);
+        if iterator.is_null() {
+            return None;
+        }
+
+        let metadata = if SLSWindowIteratorAdvance(iterator) {
+            Some(WindowMetadata {
+                parent_wid: SLSWindowIteratorGetParentID(iterator),
+                tags: SLSWindowIteratorGetTags(iterator),
+                attributes: SLSWindowIteratorGetAttributes(iterator),
+            })
+        } else {
+            None
+        };
+
+        CFRelease(iterator);
+        metadata
+    }
+}
+
+fn is_suitable_window(cid: CGSConnectionID, wid: u32) -> bool {
+    match query_window_metadata(cid, wid) {
+        Some(metadata) => {
+            let suitable = is_suitable_window_metadata(metadata);
+            if !suitable {
+                debug!(
+                    "[window_filter] rejecting wid={} parent={} tags={:#x} attributes={:#x}",
+                    wid, metadata.parent_wid, metadata.tags, metadata.attributes
+                );
+            }
+            suitable
+        }
+        None => false,
+    }
 }
 
 fn cf_string_from_static(name: &std::ffi::CStr) -> CFStringRef {
@@ -236,6 +316,9 @@ impl BorderMap {
             if pid == self.own_pid {
                 return;
             }
+            if !is_suitable_window(self.main_cid, target_wid) {
+                return;
+            }
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
@@ -313,6 +396,11 @@ impl BorderMap {
             let mut bounds = CGRect::default();
             if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
                 return false;
+            }
+
+            if !is_suitable_window(self.main_cid, target_wid) {
+                self.remove(target_wid);
+                return true;
             }
 
             if !is_trackable_window(bounds, self.border_width) {
@@ -566,6 +654,10 @@ fn get_front_window(own_pid: i32) -> u32 {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
             }
             if wid == 0 {
+                continue;
+            }
+
+            if !is_suitable_window(SLSMainConnectionID(), wid) {
                 continue;
             }
 
@@ -987,7 +1079,7 @@ unsafe extern "C" fn drain_events(
     }
 }
 
-fn discover_windows(_cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
+fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
         if list.is_null() {
@@ -1020,6 +1112,10 @@ fn discover_windows(_cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
                 CFNumberGetValue(v, kCFNumberSInt32Type, &mut pid as *mut _ as *mut _);
             }
             if pid == own_pid {
+                continue;
+            }
+
+            if !is_suitable_window(cid, wid) {
                 continue;
             }
 
@@ -1193,8 +1289,8 @@ fn list_windows() {
 #[cfg(test)]
 mod tests {
     use super::{
-        CGRect, SurfacePreference, intersection_area, is_same_window_surface, is_trackable_window,
-        surface_preference,
+        CGRect, SurfacePreference, WindowMetadata, intersection_area, is_same_window_surface,
+        is_suitable_window_metadata, is_trackable_window, surface_preference,
     };
 
     #[test]
@@ -1232,5 +1328,25 @@ mod tests {
     fn small_windows_remain_trackable() {
         let small = CGRect::new(100.0, 100.0, 12.0, 18.0);
         assert!(is_trackable_window(small, 4.0));
+    }
+
+    #[test]
+    fn suitable_window_metadata_matches_document_windows() {
+        let metadata = WindowMetadata {
+            parent_wid: 0,
+            tags: super::WINDOW_TAG_DOCUMENT,
+            attributes: super::WINDOW_ATTRIBUTE_REAL,
+        };
+        assert!(is_suitable_window_metadata(metadata));
+    }
+
+    #[test]
+    fn attached_windows_are_not_suitable_targets() {
+        let metadata = WindowMetadata {
+            parent_wid: 7,
+            tags: super::WINDOW_TAG_DOCUMENT | super::WINDOW_TAG_ATTACHED,
+            attributes: super::WINDOW_ATTRIBUTE_REAL,
+        };
+        assert!(!is_suitable_window_metadata(metadata));
     }
 }
