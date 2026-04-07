@@ -13,11 +13,15 @@ use std::sync::mpsc;
 use tracing::debug;
 
 static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+const MIN_TRACKED_WINDOW_SIZE: f64 = 4.0;
+const GEOMETRY_EPSILON: f64 = 0.5;
+const SCALE_EPSILON: f64 = 0.01;
 
 /// Per-overlay state: the connection it was created on + its wid.
 struct Overlay {
     cid: CGSConnectionID,
     wid: u32,
+    bounds: CGRect,
     scale: f64,
 }
 
@@ -38,6 +42,43 @@ fn intersection_area(a: CGRect, b: CGRect) -> f64 {
 fn is_same_window_surface(a: CGRect, b: CGRect) -> bool {
     let smaller = window_area(a).min(window_area(b));
     smaller > 0.0 && intersection_area(a, b) / smaller >= 0.9
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfacePreference {
+    KeepExisting,
+    ReplaceExisting,
+}
+
+fn surface_preference(existing: CGRect, candidate: CGRect) -> Option<SurfacePreference> {
+    if !is_same_window_surface(existing, candidate) {
+        return None;
+    }
+
+    if window_area(candidate) > window_area(existing) {
+        Some(SurfacePreference::ReplaceExisting)
+    } else {
+        Some(SurfacePreference::KeepExisting)
+    }
+}
+
+fn minimum_trackable_dimension(border_width: f64) -> f64 {
+    border_width.max(MIN_TRACKED_WINDOW_SIZE)
+}
+
+fn is_trackable_window(bounds: CGRect, border_width: f64) -> bool {
+    let min_dimension = minimum_trackable_dimension(border_width);
+    bounds.size.width >= min_dimension && bounds.size.height >= min_dimension
+}
+
+fn origin_changed(a: CGRect, b: CGRect) -> bool {
+    (a.origin.x - b.origin.x).abs() > GEOMETRY_EPSILON
+        || (a.origin.y - b.origin.y).abs() > GEOMETRY_EPSILON
+}
+
+fn size_changed(a: CGRect, b: CGRect) -> bool {
+    (a.size.width - b.size.width).abs() > GEOMETRY_EPSILON
+        || (a.size.height - b.size.height).abs() > GEOMETRY_EPSILON
 }
 
 fn cf_string_from_static(name: &std::ffi::CStr) -> CFStringRef {
@@ -141,22 +182,36 @@ impl BorderMap {
         self.overlays.values().any(|o| o.wid == wid)
     }
 
-    /// Add border (batch mode, uses main cid).
+    /// Add border using the standard filtering path.
     fn add_batch(&mut self, target_wid: u32) {
-        if self.overlays.contains_key(&target_wid) {
-            return;
+        self.add_fresh(target_wid);
+    }
+
+    fn surface_replacements(&self, target_wid: u32, bounds: CGRect) -> Option<Vec<u32>> {
+        let mut replacements = Vec::new();
+
+        for &existing_wid in self.overlays.keys() {
+            if existing_wid == target_wid {
+                continue;
+            }
+
+            unsafe {
+                let mut existing_bounds = CGRect::default();
+                if SLSGetWindowBounds(self.main_cid, existing_wid, &mut existing_bounds)
+                    != kCGErrorSuccess
+                {
+                    continue;
+                }
+
+                match surface_preference(existing_bounds, bounds) {
+                    Some(SurfacePreference::KeepExisting) => return None,
+                    Some(SurfacePreference::ReplaceExisting) => replacements.push(existing_wid),
+                    None => {}
+                }
+            }
         }
-        let color = self.color_for(target_wid);
-        if let Some((cid, wid, scale)) = create_overlay(
-            self.main_cid,
-            target_wid,
-            self.border_width,
-            self.radius,
-            color,
-        ) {
-            self.overlays
-                .insert(target_wid, Overlay { cid, wid, scale });
-        }
+
+        Some(replacements)
     }
 
     /// Add border (event mode). Uses main_cid — fresh connections create
@@ -184,44 +239,37 @@ impl BorderMap {
 
             let mut bounds = CGRect::default();
             SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds);
-            if bounds.size.width < 50.0 || bounds.size.height < 50.0 {
+            if !is_trackable_window(bounds, self.border_width) {
                 return;
             }
             bounds
         };
 
-        // Skip container windows: if a tracked window is at the same position,
-        // keep the smaller one (content) and skip the larger one (container)
-        let cx = bounds.origin.x + bounds.size.width / 2.0;
-        let cy = bounds.origin.y + bounds.size.height / 2.0;
-        let area = window_area(bounds);
-        for &existing_wid in self.overlays.keys() {
-            unsafe {
-                let mut eb = CGRect::default();
-                if SLSGetWindowBounds(self.main_cid, existing_wid, &mut eb) != kCGErrorSuccess {
-                    continue;
-                }
-                let ecx = eb.origin.x + eb.size.width / 2.0;
-                let ecy = eb.origin.y + eb.size.height / 2.0;
-                if (cx - ecx).abs() < 30.0 && (cy - ecy).abs() < 30.0 {
-                    let earea = window_area(eb);
-                    if area >= earea {
-                        return;
-                    } // new window is container, skip
-                }
-            }
+        let Some(replacements) = self.surface_replacements(target_wid, bounds) else {
+            return;
+        };
+
+        for wid in replacements {
+            self.remove(wid);
         }
 
         let color = self.color_for(target_wid);
-        if let Some((cid, wid, scale)) = create_overlay(
+        if let Some((cid, wid, bounds, scale)) = create_overlay(
             self.main_cid,
             target_wid,
             self.border_width,
             self.radius,
             color,
         ) {
-            self.overlays
-                .insert(target_wid, Overlay { cid, wid, scale });
+            self.overlays.insert(
+                target_wid,
+                Overlay {
+                    cid,
+                    wid,
+                    bounds,
+                    scale,
+                },
+            );
         }
     }
 
@@ -251,41 +299,77 @@ impl BorderMap {
         }
     }
 
-    /// Move overlay to match target's current position (no recreate).
-    fn reposition(&mut self, target_wid: u32) -> bool {
-        let Some((overlay_cid, overlay_wid, overlay_scale)) = self
+    /// Reconcile a tracked overlay against its target window.
+    fn sync_overlay(&mut self, target_wid: u32) -> bool {
+        let Some((overlay_cid, overlay_wid, overlay_bounds, overlay_scale)) = self
             .overlays
             .get(&target_wid)
-            .map(|overlay| (overlay.cid, overlay.wid, overlay.scale))
+            .map(|overlay| (overlay.cid, overlay.wid, overlay.bounds, overlay.scale))
         else {
             return false;
         };
 
         unsafe {
             let mut bounds = CGRect::default();
-            if SLSGetWindowBounds(overlay_cid, target_wid, &mut bounds) != kCGErrorSuccess {
+            if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
                 return false;
             }
 
+            if !is_trackable_window(bounds, self.border_width) {
+                self.remove(target_wid);
+                return true;
+            }
+
             let scale = display_scale_for_bounds(bounds);
-            if (scale - overlay_scale).abs() > 0.01 {
+            if size_changed(overlay_bounds, bounds) || (scale - overlay_scale).abs() > SCALE_EPSILON
+            {
                 debug!(
-                    "[reposition] target={} scale changed {:.2} -> {:.2}, recreating",
-                    target_wid, overlay_scale, scale
+                    "[sync_overlay] target={} geometry changed bounds=({:.1},{:.1},{:.1},{:.1}) -> ({:.1},{:.1},{:.1},{:.1}) scale {:.2} -> {:.2}, recreating",
+                    target_wid,
+                    overlay_bounds.origin.x,
+                    overlay_bounds.origin.y,
+                    overlay_bounds.size.width,
+                    overlay_bounds.size.height,
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
+                    overlay_scale,
+                    scale
                 );
                 self.recreate(target_wid);
                 return true;
             }
 
-            let bw = self.border_width;
-            let origin = CGPoint {
-                x: bounds.origin.x - bw,
-                y: bounds.origin.y - bw,
-            };
-            SLSMoveWindow(overlay_cid, overlay_wid, &origin);
+            if origin_changed(overlay_bounds, bounds) {
+                let bw = self.border_width;
+                let origin = CGPoint {
+                    x: bounds.origin.x - bw,
+                    y: bounds.origin.y - bw,
+                };
+                SLSMoveWindow(overlay_cid, overlay_wid, &origin);
+            }
+
+            if let Some(overlay) = self.overlays.get_mut(&target_wid) {
+                overlay.bounds = bounds;
+                overlay.scale = scale;
+                overlay.cid = overlay_cid;
+                overlay.wid = overlay_wid;
+            }
         }
 
         false
+    }
+
+    fn reconcile_tracked(&mut self) -> bool {
+        let tracked: Vec<u32> = self.overlays.keys().copied().collect();
+        let mut changed = false;
+
+        for wid in tracked {
+            changed |= self.sync_overlay(wid);
+        }
+
+        changed
     }
 
     /// Recreate overlay at new size.
@@ -787,19 +871,14 @@ fn main() {
                 for j in (i + 1)..bounds_map.len() {
                     let (wid_a, a) = &bounds_map[i];
                     let (wid_b, b) = &bounds_map[j];
-                    // Check if centers are close (within 30px)
-                    let cx_a = a.origin.x + a.size.width / 2.0;
-                    let cy_a = a.origin.y + a.size.height / 2.0;
-                    let cx_b = b.origin.x + b.size.width / 2.0;
-                    let cy_b = b.origin.y + b.size.height / 2.0;
-                    if (cx_a - cx_b).abs() < 30.0 && (cy_a - cy_b).abs() < 30.0 {
-                        // Skip the larger one
-                        let area_a = window_area(*a);
-                        let area_b = window_area(*b);
-                        if area_a > area_b {
-                            skip.insert(*wid_a);
-                        } else {
-                            skip.insert(*wid_b);
+                    if let Some(preference) = surface_preference(*a, *b) {
+                        match preference {
+                            SurfacePreference::KeepExisting => {
+                                skip.insert(*wid_b);
+                            }
+                            SurfacePreference::ReplaceExisting => {
+                                skip.insert(*wid_a);
+                            }
                         }
                     }
                 }
@@ -818,7 +897,7 @@ fn main() {
 
             // Moves: reposition overlay (no destroy/create)
             for wid in &moved {
-                if !resized.contains(wid) && !ready.contains(wid) && borders.reposition(*wid) {
+                if !resized.contains(wid) && !ready.contains(wid) && borders.sync_overlay(*wid) {
                     needs_resubscribe = true;
                 }
             }
@@ -826,8 +905,10 @@ fn main() {
             // Resizes: must recreate (can't reshape windows on Tahoe)
             // Skip windows just created this batch — already at correct size
             for wid in &resized {
-                if !ready.contains(wid) && borders.overlays.contains_key(wid) {
-                    borders.recreate(*wid);
+                if !ready.contains(wid)
+                    && borders.overlays.contains_key(wid)
+                    && borders.sync_overlay(*wid)
+                {
                     needs_resubscribe = true;
                 }
             }
@@ -836,6 +917,8 @@ fn main() {
             if needs_resubscribe {
                 borders.discover_untracked();
             }
+
+            needs_resubscribe |= borders.reconcile_tracked();
 
             // Update focus (redraws borders in-place if changed)
             borders.update_focus();
@@ -995,7 +1078,7 @@ fn create_overlay(
     border_width: f64,
     radius: f64,
     color: (f64, f64, f64, f64),
-) -> Option<(CGSConnectionID, u32, f64)> {
+) -> Option<(CGSConnectionID, u32, CGRect, f64)> {
     unsafe {
         let mut bounds = CGRect::default();
         let rc = SLSGetWindowBounds(cid, target_wid, &mut bounds);
@@ -1003,7 +1086,7 @@ fn create_overlay(
             debug!("[create_overlay] SLSGetWindowBounds failed for wid={target_wid} rc={rc}");
             return None;
         }
-        if bounds.size.width < 10.0 || bounds.size.height < 10.0 {
+        if !is_trackable_window(bounds, border_width) {
             debug!(
                 "[create_overlay] wid={target_wid} too small: {}x{}",
                 bounds.size.width, bounds.size.height
@@ -1056,7 +1139,7 @@ fn create_overlay(
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
-        Some((cid, wid, scale))
+        Some((cid, wid, bounds, scale))
     }
 }
 
@@ -1109,7 +1192,10 @@ fn list_windows() {
 
 #[cfg(test)]
 mod tests {
-    use super::{CGRect, intersection_area, is_same_window_surface};
+    use super::{
+        CGRect, SurfacePreference, intersection_area, is_same_window_surface, is_trackable_window,
+        surface_preference,
+    };
 
     #[test]
     fn same_surface_detects_contained_strip() {
@@ -1130,5 +1216,21 @@ mod tests {
         let a = CGRect::new(100.0, 100.0, 200.0, 200.0);
         let b = CGRect::new(400.0, 400.0, 200.0, 200.0);
         assert_eq!(intersection_area(a, b), 0.0);
+    }
+
+    #[test]
+    fn same_surface_prefers_larger_bounds() {
+        let strip = CGRect::new(114.0, 105.0, 1160.0, 140.0);
+        let outer = CGRect::new(100.0, 100.0, 1200.0, 900.0);
+        assert_eq!(
+            surface_preference(strip, outer),
+            Some(SurfacePreference::ReplaceExisting)
+        );
+    }
+
+    #[test]
+    fn small_windows_remain_trackable() {
+        let small = CGRect::new(100.0, 100.0, 12.0, 18.0);
+        assert!(is_trackable_window(small, 4.0));
     }
 }
