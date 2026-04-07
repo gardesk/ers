@@ -18,6 +18,7 @@ static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 struct Overlay {
     cid: CGSConnectionID,
     wid: u32,
+    scale: f64,
 }
 
 fn window_area(bounds: CGRect) -> f64 {
@@ -45,6 +46,59 @@ fn cf_string_from_static(name: &std::ffi::CStr) -> CFStringRef {
 
 unsafe extern "C" fn handle_sigint(_: libc::c_int) {
     SIGNAL_STOP_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+fn display_scale_for_bounds(bounds: CGRect) -> f64 {
+    let point = CGPoint {
+        x: bounds.origin.x + bounds.size.width / 2.0,
+        y: bounds.origin.y + bounds.size.height / 2.0,
+    };
+
+    unsafe {
+        let mut display_id = 0u32;
+        let mut count = 0u32;
+        if CGGetDisplaysWithPoint(point, 1, &mut display_id, &mut count) != kCGErrorSuccess
+            || count == 0
+        {
+            return 2.0;
+        }
+
+        let mode = CGDisplayCopyDisplayMode(display_id);
+        if mode.is_null() {
+            return 2.0;
+        }
+
+        let width = CGDisplayModeGetWidth(mode) as f64;
+        let height = CGDisplayModeGetHeight(mode) as f64;
+        let pixel_width = CGDisplayModeGetPixelWidth(mode) as f64;
+        let pixel_height = CGDisplayModeGetPixelHeight(mode) as f64;
+        CFRelease(mode as CFTypeRef);
+
+        let scale_x = if width > 0.0 {
+            pixel_width / width
+        } else {
+            0.0
+        };
+        let scale_y = if height > 0.0 {
+            pixel_height / height
+        } else {
+            0.0
+        };
+
+        let scale = match (scale_x.is_finite(), scale_y.is_finite()) {
+            (true, true) if scale_x >= 1.0 && scale_y >= 1.0 => (scale_x + scale_y) / 2.0,
+            (true, _) if scale_x >= 1.0 => scale_x,
+            (_, true) if scale_y >= 1.0 => scale_y,
+            _ => 2.0,
+        };
+
+        debug!(
+            "[display_scale] display={} point=({:.1},{:.1}) scale={:.2}",
+            display_id, point.x, point.y, scale
+        );
+
+        scale
+    }
 }
 
 /// Tracks overlays for target windows.
@@ -93,14 +147,15 @@ impl BorderMap {
             return;
         }
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(
+        if let Some((cid, wid, scale)) = create_overlay(
             self.main_cid,
             target_wid,
             self.border_width,
             self.radius,
             color,
         ) {
-            self.overlays.insert(target_wid, Overlay { cid, wid });
+            self.overlays
+                .insert(target_wid, Overlay { cid, wid, scale });
         }
     }
 
@@ -158,14 +213,15 @@ impl BorderMap {
         }
 
         let color = self.color_for(target_wid);
-        if let Some((cid, wid)) = create_overlay(
+        if let Some((cid, wid, scale)) = create_overlay(
             self.main_cid,
             target_wid,
             self.border_width,
             self.radius,
             color,
         ) {
-            self.overlays.insert(target_wid, Overlay { cid, wid });
+            self.overlays
+                .insert(target_wid, Overlay { cid, wid, scale });
         }
     }
 
@@ -196,21 +252,40 @@ impl BorderMap {
     }
 
     /// Move overlay to match target's current position (no recreate).
-    fn reposition(&self, target_wid: u32) {
-        if let Some(overlay) = self.overlays.get(&target_wid) {
-            unsafe {
-                let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
-                    return;
-                }
-                let bw = self.border_width;
-                let origin = CGPoint {
-                    x: bounds.origin.x - bw,
-                    y: bounds.origin.y - bw,
-                };
-                SLSMoveWindow(overlay.cid, overlay.wid, &origin);
+    fn reposition(&mut self, target_wid: u32) -> bool {
+        let Some((overlay_cid, overlay_wid, overlay_scale)) = self
+            .overlays
+            .get(&target_wid)
+            .map(|overlay| (overlay.cid, overlay.wid, overlay.scale))
+        else {
+            return false;
+        };
+
+        unsafe {
+            let mut bounds = CGRect::default();
+            if SLSGetWindowBounds(overlay_cid, target_wid, &mut bounds) != kCGErrorSuccess {
+                return false;
             }
+
+            let scale = display_scale_for_bounds(bounds);
+            if (scale - overlay_scale).abs() > 0.01 {
+                debug!(
+                    "[reposition] target={} scale changed {:.2} -> {:.2}, recreating",
+                    target_wid, overlay_scale, scale
+                );
+                self.recreate(target_wid);
+                return true;
+            }
+
+            let bw = self.border_width;
+            let origin = CGPoint {
+                x: bounds.origin.x - bw,
+                y: bounds.origin.y - bw,
+            };
+            SLSMoveWindow(overlay_cid, overlay_wid, &origin);
         }
+
+        false
     }
 
     /// Recreate overlay at new size.
@@ -743,8 +818,8 @@ fn main() {
 
             // Moves: reposition overlay (no destroy/create)
             for wid in &moved {
-                if !resized.contains(wid) && !ready.contains(wid) {
-                    borders.reposition(*wid);
+                if !resized.contains(wid) && !ready.contains(wid) && borders.reposition(*wid) {
+                    needs_resubscribe = true;
                 }
             }
 
@@ -920,7 +995,7 @@ fn create_overlay(
     border_width: f64,
     radius: f64,
     color: (f64, f64, f64, f64),
-) -> Option<(CGSConnectionID, u32)> {
+) -> Option<(CGSConnectionID, u32, f64)> {
     unsafe {
         let mut bounds = CGRect::default();
         let rc = SLSGetWindowBounds(cid, target_wid, &mut bounds);
@@ -941,6 +1016,7 @@ fn create_overlay(
         let oh = bounds.size.height + 2.0 * bw;
         let ox = bounds.origin.x - bw;
         let oy = bounds.origin.y - bw;
+        let scale = display_scale_for_bounds(bounds);
 
         let frame = CGRect::new(0.0, 0.0, ow, oh);
         let mut region: CFTypeRef = ptr::null();
@@ -959,11 +1035,11 @@ fn create_overlay(
         }
 
         debug!(
-            "[create_overlay] created overlay wid={wid} for target={target_wid} color=({:.2},{:.2},{:.2},{:.2})",
+            "[create_overlay] created overlay wid={wid} for target={target_wid} scale={scale:.2} color=({:.2},{:.2},{:.2},{:.2})",
             color.0, color.1, color.2, color.3
         );
 
-        SLSSetWindowResolution(cid, wid, 2.0);
+        SLSSetWindowResolution(cid, wid, scale);
         SLSSetWindowOpacity(cid, wid, false);
         SLSSetWindowLevel(cid, wid, 0);
         SLSOrderWindow(cid, wid, 1, target_wid);
@@ -980,7 +1056,7 @@ fn create_overlay(
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
-        Some((cid, wid))
+        Some((cid, wid, scale))
     }
 }
 

@@ -106,6 +106,7 @@ pub type CGContextRef = *mut c_void;
 pub type CGPathRef = *const c_void;
 pub type CGMutablePathRef = *mut c_void;
 pub type CGEventRef = *const c_void;
+pub type CGDisplayModeRef = *const c_void;
 
 // CF constants
 pub const kCFNumberSInt32Type: i32 = 3;
@@ -304,6 +305,17 @@ pub const kCGNullWindowID: u32 = 0;
 
 unsafe extern "C" {
     pub fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFArrayRef;
+    pub fn CGGetDisplaysWithPoint(
+        point: CGPoint,
+        max_displays: u32,
+        displays: *mut u32,
+        count: *mut u32,
+    ) -> CGError;
+    pub fn CGDisplayCopyDisplayMode(display: u32) -> CGDisplayModeRef;
+    pub fn CGDisplayModeGetWidth(mode: CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetHeight(mode: CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetPixelWidth(mode: CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetPixelHeight(mode: CGDisplayModeRef) -> usize;
     pub fn CFDictionaryGetValueIfPresent(
         dict: CFDictionaryRef,
         key: CFTypeRef,
