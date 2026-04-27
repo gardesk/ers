@@ -1235,6 +1235,13 @@ fn create_overlay(
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
+        // Click-through. Without this the overlay window swallows mouse
+        // clicks and scroll-wheel/trackpad gestures inside the target
+        // window's bounds. Bit 1 of the SLS tag word is kCGSIgnoreForEvents.
+        // Must run AFTER drawing — see CLAUDE.md "Draw before setting tags".
+        let tags: u64 = 1 << 1;
+        SLSSetWindowTags(cid, wid, &tags, 64);
+
         Some((cid, wid, bounds, scale))
     }
 }
