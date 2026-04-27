@@ -1235,12 +1235,21 @@ fn create_overlay(
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
-        // Click-through. Without this the overlay window swallows mouse
-        // clicks and scroll-wheel/trackpad gestures inside the target
-        // window's bounds. Bit 1 of the SLS tag word is kCGSIgnoreForEvents.
-        // Must run AFTER drawing — see CLAUDE.md "Draw before setting tags".
-        let tags: u64 = 1 << 1;
-        SLSSetWindowTags(cid, wid, &tags, 64);
+        // Click-through. Setting an empty event/hit-test shape makes mouse
+        // events pass through the overlay to the window beneath. We use
+        // SLSSetWindowEventShape rather than SLSSetWindowTags(kCGSIgnoreForEvents)
+        // because tag mutation in the event-driven recreate path poisons
+        // subsequent SLSNewWindow calls on the shared connection.
+        // SLSSetWindowEventMask alone was insufficient on Tahoe.
+        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
+        let mut empty_region: CFTypeRef = ptr::null();
+        if CGSNewRegionWithRect(&empty, &mut empty_region) == kCGErrorSuccess
+            && !empty_region.is_null()
+        {
+            SLSSetWindowEventShape(cid, wid, empty_region);
+            CFRelease(empty_region);
+        }
+        SLSSetWindowEventMask(cid, wid, 0);
 
         Some((cid, wid, bounds, scale))
     }
