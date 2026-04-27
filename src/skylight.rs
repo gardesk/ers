@@ -208,6 +208,22 @@ unsafe extern "C" {
     /// through to the window beneath. Equivalent to NSWindow's
     /// `setIgnoresMouseEvents(true)` at the SLS layer.
     pub fn SLSSetWindowEventShape(cid: CGSConnectionID, wid: u32, shape: CFTypeRef) -> CGError;
+    /// NSWindowSharingType for the SLS window: 0 = None (excluded from
+    /// screen capture / picker / recording), 1 = ReadOnly, 2 = ReadWrite.
+    /// Tahoe's exported symbol is `SLSSetWindowSharingState` (not `Type`).
+    /// Setting 0 makes the overlay invisible to ScreenCaptureKit, the
+    /// cmd+shift+4 + space picker, etc., so user screenshots fall through
+    /// to the underlying app window.
+    pub fn SLSSetWindowSharingState(cid: CGSConnectionID, wid: u32, state: u32) -> CGError;
+    /// Marks the SLS window as a non-standard "perceived type" so that
+    /// screen-capture clients can choose to skip it. Yabai/skhd use this
+    /// to keep borders out of screenshots without poisoning SLSNewWindow
+    /// (unlike tag bits). Type 2 = "popup", 13/14 = system overlays.
+    pub fn SLSSetWindowClientPerceivedType(
+        cid: CGSConnectionID,
+        wid: u32,
+        kind: u32,
+    ) -> CGError;
     pub fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
     pub fn SLSSetWindowBackgroundBlurRadius(cid: CGSConnectionID, wid: u32, radius: u32)
     -> CGError;
@@ -254,6 +270,18 @@ unsafe extern "C" {
         x_offset: f32,
         y_offset: f32,
         shape: CFTypeRef,
+    ) -> CGError;
+    /// Sets a window's actual bounds region (what the window-server
+    /// considers part of the window for hit-testing, capture, and
+    /// rendering) using a CGPath instead of a CGS region. Lets us
+    /// install a donut-shaped region without needing a multi-rect
+    /// region constructor — none of which exist in linkable form on
+    /// Tahoe except `CGSNewRegionWithRect` (single rect).
+    pub fn SLSTransactionSetWindowBoundsPath(
+        transaction: CFTypeRef,
+        cid: CGSConnectionID,
+        wid: u32,
+        path: CGPathRef,
     ) -> CGError;
 
     // Flicker suppression
