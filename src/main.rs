@@ -546,6 +546,14 @@ impl BorderMap {
         self.focused_wid = front;
         debug!("[focus] {} -> {}", old, front);
 
+        // Pull both overlays' positions to the targets' current SLS bounds
+        // before un/hiding. AX-driven moves during a stack cycle frequently
+        // don't fire SLS WINDOW_MOVE notifications, so a stored overlay
+        // can be at stale coordinates. SLSGetWindowBounds (inside
+        // sync_overlay) is real-time and doesn't wait for a notification.
+        self.sync_overlay(old);
+        self.sync_overlay(front);
+
         if self.active_only {
             self.hide(old);
             self.unhide(front);
