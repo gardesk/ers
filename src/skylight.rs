@@ -210,6 +210,12 @@ unsafe extern "C" {
         tags: *const u64,
         tag_size: i32,
     ) -> CGError;
+    pub fn CGSGetWindowTags(
+        cid: CGSConnectionID,
+        wid: u32,
+        tags: *mut u64,
+        tag_size: i32,
+    ) -> CGError;
     pub fn SLSSetWindowShape(
         cid: CGSConnectionID,
         wid: u32,
