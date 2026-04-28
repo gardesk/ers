@@ -50,32 +50,39 @@ pub fn init_application() -> MainThreadMarker {
 }
 
 /// One NSWindow + CAShapeLayer pair drawing a rounded-rect border.
+///
+/// `bounds_cg_*` fields are the TARGET window's CG bounds (origin
+/// top-left, Y-down) — same coordinate system the rest of ers uses.
 pub struct OverlayWindow {
     window: Retained<NSWindow>,
     border_layer: Retained<CAShapeLayer>,
-    pub bounds_cg: CGRect,
+    pub bounds_cg_x: f64,
+    pub bounds_cg_y: f64,
+    pub bounds_cg_w: f64,
+    pub bounds_cg_h: f64,
     pub border_width: f64,
     pub radius: f64,
     mtm: MainThreadMarker,
 }
 
 impl OverlayWindow {
-    /// Create an NSWindow border overlay covering `target_bounds_cg + border_width`.
+    /// Create an NSWindow border overlay around the given target bounds.
+    /// Coords are in CG space (origin top-left, Y-down).
     pub fn new(
-        target_bounds_cg: CGRect,
+        bounds_cg_x: f64,
+        bounds_cg_y: f64,
+        bounds_cg_w: f64,
+        bounds_cg_h: f64,
         border_width: f64,
         radius: f64,
         color: (f64, f64, f64, f64),
         mtm: MainThreadMarker,
     ) -> Option<Self> {
         let outer_cg = CGRect::new(
-            CGPoint::new(
-                target_bounds_cg.origin.x - border_width,
-                target_bounds_cg.origin.y - border_width,
-            ),
+            CGPoint::new(bounds_cg_x - border_width, bounds_cg_y - border_width),
             CGSize::new(
-                target_bounds_cg.size.width + 2.0 * border_width,
-                target_bounds_cg.size.height + 2.0 * border_width,
+                bounds_cg_w + 2.0 * border_width,
+                bounds_cg_h + 2.0 * border_width,
             ),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, mtm);
@@ -141,7 +148,10 @@ impl OverlayWindow {
         Some(OverlayWindow {
             window,
             border_layer,
-            bounds_cg: target_bounds_cg,
+            bounds_cg_x,
+            bounds_cg_y,
+            bounds_cg_w,
+            bounds_cg_h,
             border_width,
             radius,
             mtm,
@@ -153,16 +163,10 @@ impl OverlayWindow {
         self.window.windowNumber() as u32
     }
 
-    pub fn set_bounds(&mut self, target_bounds_cg: CGRect) {
+    pub fn set_bounds(&mut self, x: f64, y: f64, w: f64, h: f64) {
         let outer_cg = CGRect::new(
-            CGPoint::new(
-                target_bounds_cg.origin.x - self.border_width,
-                target_bounds_cg.origin.y - self.border_width,
-            ),
-            CGSize::new(
-                target_bounds_cg.size.width + 2.0 * self.border_width,
-                target_bounds_cg.size.height + 2.0 * self.border_width,
-            ),
+            CGPoint::new(x - self.border_width, y - self.border_width),
+            CGSize::new(w + 2.0 * self.border_width, h + 2.0 * self.border_width),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
         self.window.setFrame_display(cocoa_frame, true);
@@ -182,7 +186,10 @@ impl OverlayWindow {
                 CGSize::new(outer_cg.size.width, outer_cg.size.height),
             ));
         }
-        self.bounds_cg = target_bounds_cg;
+        self.bounds_cg_x = x;
+        self.bounds_cg_y = y;
+        self.bounds_cg_w = w;
+        self.bounds_cg_h = h;
     }
 
     pub fn set_color(&self, color: (f64, f64, f64, f64)) {
