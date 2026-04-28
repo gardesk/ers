@@ -1362,6 +1362,23 @@ fn create_overlay(
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
 
+        // Post-creation tag mutation matching JankyBorders' pattern
+        // at .refs/JankyBorders/src/misc/window.h:266-267. Verified
+        // ineffective on Tahoe: tags set on windows owned by a
+        // SLSNewConnection-created cid do NOT propagate to the global
+        // server-side tag store, regardless of which cid issues the
+        // SLSSetWindowTags call (tested both fresh and main cid).
+        // The screencaptureui picker queries via _CGSGetWindowTags
+        // from its own connection (otool confirmed) and reads 0x0 for
+        // our overlays. Kept here aligned with JB so the diff is
+        // legible; the actual fix requires creating overlays on the
+        // process main cid (conflicts with the per-border fresh-cid
+        // requirement in ers/CLAUDE.md) or backing them with NSWindow.
+        let mut set_tags: u64 = (1u64 << 1) | (1u64 << 9);
+        let mut clear_tags: u64 = 0;
+        SLSSetWindowTags(cid, wid, &mut set_tags as *mut u64, 64);
+        SLSClearWindowTags(cid, wid, &mut clear_tags as *mut u64, 64);
+
         Some((cid, wid, bounds, scale))
     }
 }
