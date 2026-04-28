@@ -103,9 +103,12 @@ impl OverlayWindow {
         window.setLevel(NS_FLOATING_WINDOW_LEVEL);
         unsafe { window.setReleasedWhenClosed(false) };
         window.setSharingType(NSWindowSharingType::None);
+        // Do NOT set CanJoinAllSpaces: that would draw the overlay on
+        // every macOS space simultaneously. tarmac's workspaces are
+        // not macOS spaces, but if the user has both, leaking onto
+        // every space looks like a "stuck border" bug.
         window.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::Stationary
+            NSWindowCollectionBehavior::Stationary
                 | NSWindowCollectionBehavior::IgnoresCycle
                 | NSWindowCollectionBehavior::FullScreenAuxiliary,
         );

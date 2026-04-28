@@ -460,12 +460,14 @@ impl BorderMap {
 
     fn hide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
+            debug!("[hide] target={} overlay_wid={}", target_wid, o.wid());
             o.window.order_out();
         }
     }
 
     fn unhide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
+            debug!("[unhide] target={} overlay_wid={}", target_wid, o.wid());
             o.window.order_above(target_wid);
         }
     }
@@ -506,7 +508,12 @@ impl BorderMap {
 
         let old = self.focused_wid;
         self.focused_wid = front;
-        debug!("[focus] {} -> {}", old, front);
+        debug!(
+            "[focus] {} -> {} (tracked targets: {:?})",
+            old,
+            front,
+            self.overlays.keys().collect::<Vec<_>>()
+        );
 
         // Pull both overlays' positions to the targets' current SLS bounds
         // before un/hiding. AX-driven moves during a stack cycle frequently
