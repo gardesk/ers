@@ -135,7 +135,7 @@ impl OverlayWindow {
             let stroke_ref: *mut AnyObject =
                 objc2_core_foundation::CFRetained::as_ptr(&stroke).as_ptr() as *mut AnyObject;
             let _: () = msg_send![&*border_layer, setStrokeColor: stroke_ref];
-            border_layer.setLineWidth(border_width * 2.0);
+            border_layer.setLineWidth(border_width);
             border_layer.setFrame(CGRect::new(
                 CGPoint::new(0.0, 0.0),
                 CGSize::new(outer_cg.size.width, outer_cg.size.height),
@@ -217,14 +217,21 @@ impl OverlayWindow {
 
 impl Drop for OverlayWindow {
     fn drop(&mut self) {
+        // orderOut first so the visual disappears synchronously;
+        // close() afterward releases the window. Without orderOut a
+        // closed-but-still-onscreen window can briefly linger on
+        // Tahoe before Retained drops the last ref.
+        self.window.orderOut(None);
         self.window.close();
     }
 }
 
 fn inset_for_stroke(size: CGSize, border_width: f64) -> CGRect {
-    // CAShapeLayer strokes centered on the path. To get the stroke
-    // exactly inside the layer bounds we inset by half the line width.
-    let half = border_width;
+    // CAShapeLayer strokes centered on the path. To get an exactly
+    // border_width-thick visible ring sitting inside the layer bounds,
+    // inset the path by half the line width and stroke at line_width
+    // = border_width.
+    let half = border_width / 2.0;
     CGRect::new(
         CGPoint::new(half, half),
         CGSize::new(
