@@ -37,7 +37,7 @@ These are hard-won discoveries from debugging undocumented APIs:
 
 1. **SLSCopyManagedDisplaySpaces poisons SLSNewWindow** — calling it on ANY connection corrupts window creation on ALL connections. Use `CGWindowListCopyWindowInfo` instead.
 
-2. **Fresh SLS connection per border** — each overlay needs its own `SLSNewConnection`. Required for reliable rendering.
+2. **Use the process main connection** — `SLSMainConnectionID()` for window creation, drawing, ordering, and event registration (current code already does this). Past notes mentioned a "fresh SLSNewConnection per border" requirement; that has not been needed since the current architecture stabilized.
 
 3. **Create windows at final size** — the 1×1-then-reshape pattern breaks on Tahoe. Create at correct position/size immediately.
 
