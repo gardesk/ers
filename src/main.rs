@@ -1087,6 +1087,68 @@ unsafe extern "C" fn drain_events(
     }
 }
 
+/// Look up an overlay window in CGWindowListCopyWindowInfo and dump the
+/// keys that the screenshot picker / ScreenCaptureKit care about. Lets
+/// us tell whether SLSSetWindowSharingState(0) propagates through to
+/// the CG window list (the layer SCWindow filters on) or stops at SLS.
+fn probe_cg_window_info(target_wid: u32) {
+    unsafe {
+        let list = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
+        if list.is_null() {
+            debug!("[probe_cg_window_info] wid={target_wid} list is null");
+            return;
+        }
+        let count = CFArrayGetCount(list);
+        let wid_key = cf_string_from_static(c"kCGWindowNumber");
+        let sharing_key = cf_string_from_static(c"kCGWindowSharingState");
+        let layer_key = cf_string_from_static(c"kCGWindowLayer");
+        let alpha_key = cf_string_from_static(c"kCGWindowAlpha");
+        let on_screen_key = cf_string_from_static(c"kCGWindowIsOnscreen");
+        let mut found = false;
+
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(list, i);
+            if dict.is_null() {
+                continue;
+            }
+            let mut v: CFTypeRef = ptr::null();
+            let mut wid: u32 = 0;
+            if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
+            }
+            if wid != target_wid {
+                continue;
+            }
+
+            let mut sharing: i32 = -1;
+            if CFDictionaryGetValueIfPresent(dict, sharing_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut sharing as *mut _ as *mut _);
+            }
+            let mut layer: i32 = i32::MIN;
+            if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
+            }
+            let mut alpha: f64 = -1.0;
+            if CFDictionaryGetValueIfPresent(dict, alpha_key as CFTypeRef, &mut v) {
+                CFNumberGetValue(v, 13 /* kCFNumberDoubleType */, &mut alpha as *mut _ as *mut _);
+            }
+            let on_screen_present =
+                CFDictionaryGetValueIfPresent(dict, on_screen_key as CFTypeRef, &mut v);
+
+            debug!(
+                "[probe_cg_window_info] wid={target_wid} cg_sharing={sharing} layer={layer} alpha={alpha:.3} on_screen_present={on_screen_present}"
+            );
+            found = true;
+            break;
+        }
+
+        if !found {
+            debug!("[probe_cg_window_info] wid={target_wid} NOT FOUND in CGWindowList");
+        }
+        CFRelease(list as CFTypeRef);
+    }
+}
+
 fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
@@ -1213,11 +1275,47 @@ fn create_overlay(
             return None;
         }
 
+        // Empty hit-test shape: an SLS window with an empty opaque_shape
+        // is click-through at the compositor level (no input region).
+        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
+        let mut empty_region: CFTypeRef = ptr::null();
+        if CGSNewRegionWithRect(&empty, &mut empty_region) != kCGErrorSuccess
+            || empty_region.is_null()
+        {
+            debug!("[create_overlay] CGSNewRegionWithRect (empty) failed for wid={target_wid}");
+            CFRelease(region);
+            return None;
+        }
+
+        // Create the overlay via SLSNewWindowWithOpaqueShapeAndContext
+        // and bake tag bit 1 (click-through) and tag bit 9 (screenshot
+        // exclusion) into the window at birth. Tahoe classifies windows
+        // for capture/picker based on tags observed at creation time;
+        // post-creation tag mutation lands too late and the picker keeps
+        // including the overlay. Mirrors the JankyBorders unmanaged
+        // create path (.refs/JankyBorders/src/misc/window.h:239).
+        // options 13|(1<<18): documentation-window | ignores-cycle.
+        let mut tags: u64 = (1u64 << 1) | (1u64 << 9);
         let mut wid: u32 = 0;
-        SLSNewWindow(cid, 2, ox as f32, oy as f32, region, &mut wid);
+        SLSNewWindowWithOpaqueShapeAndContext(
+            cid,
+            2,
+            region,
+            empty_region,
+            13 | (1 << 18),
+            &mut tags as *mut u64,
+            ox as f32,
+            oy as f32,
+            64,
+            &mut wid,
+            ptr::null_mut(),
+        );
         CFRelease(region);
+        CFRelease(empty_region);
         if wid == 0 {
-            debug!("[create_overlay] SLSNewWindow returned 0 for target={target_wid} cid={cid}");
+            debug!(
+                "[create_overlay] SLSNewWindowWithOpaqueShapeAndContext returned 0 for target={target_wid} cid={cid}"
+            );
             return None;
         }
 
@@ -1225,6 +1323,27 @@ fn create_overlay(
             "[create_overlay] created overlay wid={wid} for target={target_wid} scale={scale:.2} color=({:.2},{:.2},{:.2},{:.2})",
             color.0, color.1, color.2, color.3
         );
+
+        if let Some(metadata) = query_window_metadata(cid, wid) {
+            debug!(
+                "[create_overlay] post-create overlay wid={wid} tags={:#x} attributes={:#x} parent={}",
+                metadata.tags, metadata.attributes, metadata.parent_wid
+            );
+        } else {
+            debug!("[create_overlay] post-create wid={wid} metadata query failed");
+        }
+
+        SLSSetWindowSharingState(cid, wid, 0);
+        let mut sharing_state: u32 = u32::MAX;
+        let rc = SLSGetWindowSharingState(cid, wid, &mut sharing_state);
+        debug!("[create_overlay] sharing_state wid={wid} get_rc={rc} sls_state={sharing_state}");
+
+        // Probe what CGWindowListCopyWindowInfo (which the screenshot
+        // picker / SCWindow use) reports for our overlay. If
+        // kCGWindowSharingState comes back != 0 here, then SLS-side
+        // sharing state is not propagated to the CG window list and
+        // we'll need a different exclusion mechanism.
+        probe_cg_window_info(wid);
 
         SLSSetWindowResolution(cid, wid, scale);
         SLSSetWindowOpacity(cid, wid, false);
@@ -1242,24 +1361,6 @@ fn create_overlay(
         draw_border(ctx, ow, oh, bw, radius, color);
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
-
-        // Click-through. Setting an empty event/hit-test shape passes
-        // mouse events through to the window beneath. We deliberately
-        // avoid SLSSetWindowTags(kCGSIgnoreForEvents): even when set
-        // before drawing on Tahoe, the tag-bit-1 flag breaks overlay
-        // visibility during the rapid sync_overlay/recreate churn that
-        // tiling produces. Empty event shape + zero event mask is the
-        // only combination that gives both click-through AND persistent
-        // borders on Tahoe.
-        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
-        let mut empty_region: CFTypeRef = ptr::null();
-        if CGSNewRegionWithRect(&empty, &mut empty_region) == kCGErrorSuccess
-            && !empty_region.is_null()
-        {
-            SLSSetWindowEventShape(cid, wid, empty_region);
-            CFRelease(empty_region);
-        }
-        SLSSetWindowEventMask(cid, wid, 0);
 
         Some((cid, wid, bounds, scale))
     }

@@ -175,6 +175,26 @@ unsafe extern "C" {
         region: CFTypeRef,
         wid_out: *mut u32,
     ) -> CGError;
+    /// JankyBorders' `SLSNewWindowWithOpaqueShapeAndContext` — creates a
+    /// window with a custom hit-test shape and tag bits applied at
+    /// creation. Used so that screenshot-exclusion tag bit 9 lands on
+    /// the window before macOS Tahoe's compositor classifies it; setting
+    /// the bit post-creation is unreliable on Tahoe.
+    /// Reference: .refs/JankyBorders/src/misc/window.h:239
+    /// Reference: .refs/JankyBorders/src/misc/extern.h
+    pub fn SLSNewWindowWithOpaqueShapeAndContext(
+        cid: CGSConnectionID,
+        window_type: i32,
+        region: CFTypeRef,
+        opaque_shape: CFTypeRef,
+        options: i32,
+        tags: *mut u64,
+        x: f32,
+        y: f32,
+        tag_size: i32,
+        wid_out: *mut u32,
+        context: *mut std::ffi::c_void,
+    ) -> CGError;
     pub fn SLSReleaseWindow(cid: CGSConnectionID, wid: u32) -> CGError;
 
     // Window properties
@@ -199,6 +219,15 @@ unsafe extern "C" {
     ) -> CGError;
     pub fn SLSSetWindowResolution(cid: CGSConnectionID, wid: u32, res: f64) -> CGError;
     pub fn SLSSetWindowOpacity(cid: CGSConnectionID, wid: u32, is_opaque: bool) -> CGError;
+    /// SLS-level NSWindow.sharingType. Values: 0 = None (excluded from
+    /// screen capture / picker / recording — equivalent to
+    /// kCGWindowSharingNone), 1 = ReadOnly, 2 = ReadWrite.
+    pub fn SLSSetWindowSharingState(cid: CGSConnectionID, wid: u32, state: u32) -> CGError;
+    pub fn SLSGetWindowSharingState(
+        cid: CGSConnectionID,
+        wid: u32,
+        state_out: *mut u32,
+    ) -> CGError;
     /// Mask of events the SLS window captures. Set to 0 to make the window
     /// click-through (mouse events pass to the window beneath).
     pub fn SLSSetWindowEventMask(cid: CGSConnectionID, wid: u32, mask: u32) -> CGError;
