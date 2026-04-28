@@ -101,7 +101,17 @@ pub type CFNumberRef = *const c_void;
 pub type CFMachPortRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
 pub type CFRunLoopRef = *const c_void;
+pub type CFRunLoopTimerRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
+
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: i64,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> CFStringRef>,
+}
 pub type CGContextRef = *mut c_void;
 pub type CGPathRef = *const c_void;
 pub type CGMutablePathRef = *mut c_void;
@@ -466,6 +476,18 @@ unsafe extern "C" {
     pub fn CFRunLoopRun();
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
     pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
+
+    pub fn CFRunLoopTimerCreate(
+        allocator: CFAllocatorRef,
+        fire_date: f64,
+        interval: f64,
+        flags: u32,
+        order: i64,
+        callout: extern "C" fn(*mut c_void, *mut c_void),
+        context: *mut CFRunLoopTimerContext,
+    ) -> CFRunLoopTimerRef;
+    pub fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef);
+    pub fn CFAbsoluteTimeGetCurrent() -> f64;
 
     pub static kCFAllocatorDefault: CFAllocatorRef;
     pub static kCFTypeDictionaryKeyCallBacks: c_void;
