@@ -271,18 +271,6 @@ unsafe extern "C" {
         y_offset: f32,
         shape: CFTypeRef,
     ) -> CGError;
-    /// Sets a window's actual bounds region (what the window-server
-    /// considers part of the window for hit-testing, capture, and
-    /// rendering) using a CGPath instead of a CGS region. Lets us
-    /// install a donut-shaped region without needing a multi-rect
-    /// region constructor — none of which exist in linkable form on
-    /// Tahoe except `CGSNewRegionWithRect` (single rect).
-    pub fn SLSTransactionSetWindowBoundsPath(
-        transaction: CFTypeRef,
-        cid: CGSConnectionID,
-        wid: u32,
-        path: CGPathRef,
-    ) -> CGError;
 
     // Flicker suppression
     pub fn SLSDisableUpdate(cid: CGSConnectionID) -> CGError;

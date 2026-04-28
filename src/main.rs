@@ -1265,30 +1265,6 @@ fn create_overlay(
         SLSSetWindowSharingState(cid, wid, 0);
         SLSSetWindowClientPerceivedType(cid, wid, 2);
 
-        // Replace the window's bounds region with a donut path: outer
-        // rect plus an inner subpath for the interior. SLS interprets
-        // the path with even-odd winding so the interior is *not* part
-        // of the window — the screenshot picker hit-tests through to
-        // the underlying app window. Done via SLSTransaction because
-        // SLSTransactionSetWindowBoundsPath is the only path-based bounds
-        // API exported on Tahoe; CGS region union APIs aren't linkable.
-        let interior = CGRect::new(bw, bw, (ow - 2.0 * bw).max(0.0), (oh - 2.0 * bw).max(0.0));
-        if interior.size.width > 0.0 && interior.size.height > 0.0 {
-            let path = CGPathCreateMutable();
-            if !path.is_null() {
-                let outer = CGRect::new(0.0, 0.0, ow, oh);
-                CGPathAddRect(path, ptr::null(), outer);
-                CGPathAddRect(path, ptr::null(), interior);
-                let txn = SLSTransactionCreate(cid);
-                if !txn.is_null() {
-                    SLSTransactionSetWindowBoundsPath(txn, cid, wid, path as CGPathRef);
-                    SLSTransactionCommit(txn, 1);
-                    CFRelease(txn);
-                }
-                CGPathRelease(path as CGPathRef);
-            }
-        }
-
         Some((cid, wid, bounds, scale))
     }
 }
