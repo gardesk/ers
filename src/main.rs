@@ -2,6 +2,7 @@
 
 mod events;
 mod skylight;
+mod nswindow_overlay;
 
 use events::Event;
 use skylight::*;
