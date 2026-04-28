@@ -199,31 +199,6 @@ unsafe extern "C" {
     ) -> CGError;
     pub fn SLSSetWindowResolution(cid: CGSConnectionID, wid: u32, res: f64) -> CGError;
     pub fn SLSSetWindowOpacity(cid: CGSConnectionID, wid: u32, is_opaque: bool) -> CGError;
-    /// Mask of events the SLS window captures. Set to 0 to make the window
-    /// click-through (mouse events pass to the window beneath). Used by
-    /// border overlays so the user can still click/scroll the underlying
-    /// app window.
-    pub fn SLSSetWindowEventMask(cid: CGSConnectionID, wid: u32, mask: u32) -> CGError;
-    /// Hit-test/input shape. An empty region passes all mouse events
-    /// through to the window beneath. Equivalent to NSWindow's
-    /// `setIgnoresMouseEvents(true)` at the SLS layer.
-    pub fn SLSSetWindowEventShape(cid: CGSConnectionID, wid: u32, shape: CFTypeRef) -> CGError;
-    /// NSWindowSharingType for the SLS window: 0 = None (excluded from
-    /// screen capture / picker / recording), 1 = ReadOnly, 2 = ReadWrite.
-    /// Tahoe's exported symbol is `SLSSetWindowSharingState` (not `Type`).
-    /// Setting 0 makes the overlay invisible to ScreenCaptureKit, the
-    /// cmd+shift+4 + space picker, etc., so user screenshots fall through
-    /// to the underlying app window.
-    pub fn SLSSetWindowSharingState(cid: CGSConnectionID, wid: u32, state: u32) -> CGError;
-    /// Marks the SLS window as a non-standard "perceived type" so that
-    /// screen-capture clients can choose to skip it. Yabai/skhd use this
-    /// to keep borders out of screenshots without poisoning SLSNewWindow
-    /// (unlike tag bits). Type 2 = "popup", 13/14 = system overlays.
-    pub fn SLSSetWindowClientPerceivedType(
-        cid: CGSConnectionID,
-        wid: u32,
-        kind: u32,
-    ) -> CGError;
     pub fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
     pub fn SLSSetWindowBackgroundBlurRadius(cid: CGSConnectionID, wid: u32, radius: u32)
     -> CGError;

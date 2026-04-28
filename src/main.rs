@@ -1227,6 +1227,19 @@ fn create_overlay(
         );
 
         SLSSetWindowResolution(cid, wid, scale);
+
+        // Tag bit 1 (kCGSIgnoreForEvents) makes the overlay click/scroll
+        // through; tag bit 9 hides it from ScreenCaptureKit (cmd+shift+4
+        // + space, screen recordings, the picker). Mirrors JankyBorders'
+        // ordering: tags MUST be set before SLWindowContextCreate /
+        // drawing — setting them post-draw poisons subsequent SLSNewWindow
+        // calls on the shared connection during stack-cycle recreates.
+        // tag_size 64 (0x40) is the SLS-documented length.
+        let set_tags: u64 = (1u64 << 1) | (1u64 << 9);
+        let clear_tags: u64 = 0;
+        SLSSetWindowTags(cid, wid, &set_tags, 64);
+        SLSClearWindowTags(cid, wid, &clear_tags, 64);
+
         SLSSetWindowOpacity(cid, wid, false);
         SLSSetWindowLevel(cid, wid, 0);
         SLSOrderWindow(cid, wid, 1, target_wid);
@@ -1242,28 +1255,6 @@ fn create_overlay(
         draw_border(ctx, ow, oh, bw, radius, color);
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
-
-        // Click-through. Setting an empty event/hit-test shape makes mouse
-        // events pass through the overlay to the window beneath. We use
-        // SLSSetWindowEventShape rather than SLSSetWindowTags(kCGSIgnoreForEvents)
-        // because tag mutation in the event-driven recreate path poisons
-        // subsequent SLSNewWindow calls on the shared connection.
-        // SLSSetWindowEventMask alone was insufficient on Tahoe.
-        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
-        let mut empty_region: CFTypeRef = ptr::null();
-        if CGSNewRegionWithRect(&empty, &mut empty_region) == kCGErrorSuccess
-            && !empty_region.is_null()
-        {
-            SLSSetWindowEventShape(cid, wid, empty_region);
-            CFRelease(empty_region);
-        }
-        SLSSetWindowEventMask(cid, wid, 0);
-
-        // Capture-exclusion advisories. Tahoe's screen-capture picker
-        // ignores both for SLS overlays but they're harmless and may help
-        // capture clients that do honor them.
-        SLSSetWindowSharingState(cid, wid, 0);
-        SLSSetWindowClientPerceivedType(cid, wid, 2);
 
         Some((cid, wid, bounds, scale))
     }
