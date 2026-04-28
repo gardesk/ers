@@ -25,12 +25,31 @@ const WINDOW_TAG_IGNORES_CYCLE: u64 = 1 << 18;
 const WINDOW_TAG_MODAL: u64 = 1 << 31;
 const WINDOW_TAG_REAL_SURFACE: u64 = 1 << 58;
 
-/// Per-overlay state: the connection it was created on + its wid.
+/// Per-overlay state: an NSWindow drawing the rounded-rect border via
+/// CAShapeLayer. Replaces the old SLS-only overlay window — see
+/// nswindow_overlay.rs for the rationale (screencaptureui on Tahoe
+/// only honors NSWindow.sharingType, not SLS sharing-state nor tag
+/// bits, for raw SLS-only windows).
 struct Overlay {
-    cid: CGSConnectionID,
-    wid: u32,
-    bounds: CGRect,
-    scale: f64,
+    window: nswindow_overlay::OverlayWindow,
+}
+
+impl Overlay {
+    fn wid(&self) -> u32 {
+        self.window.wid()
+    }
+    fn bounds(&self) -> CGRect {
+        CGRect {
+            origin: CGPoint {
+                x: self.window.bounds_cg_x,
+                y: self.window.bounds_cg_y,
+            },
+            size: CGSize {
+                width: self.window.bounds_cg_w,
+                height: self.window.bounds_cg_h,
+            },
+        }
+    }
 }
 
 fn window_area(bounds: CGRect) -> f64 {
@@ -234,12 +253,19 @@ struct BorderMap {
     active_color: (f64, f64, f64, f64),
     inactive_color: (f64, f64, f64, f64),
     active_only: bool,
+    mtm: objc2::MainThreadMarker,
 }
 
 impl BorderMap {
-    fn new(cid: CGSConnectionID, own_pid: i32, border_width: f64) -> Self {
+    fn new(
+        cid: CGSConnectionID,
+        own_pid: i32,
+        border_width: f64,
+        mtm: objc2::MainThreadMarker,
+    ) -> Self {
         Self {
             overlays: HashMap::new(),
+            mtm,
             main_cid: cid,
             own_pid,
             border_width,
@@ -260,7 +286,7 @@ impl BorderMap {
     }
 
     fn is_overlay(&self, wid: u32) -> bool {
-        self.overlays.values().any(|o| o.wid == wid)
+        self.overlays.values().any(|o| o.wid() == wid)
     }
 
     /// Add border using the standard filtering path.
@@ -338,63 +364,39 @@ impl BorderMap {
         }
 
         let color = self.color_for(target_wid);
-        if let Some((cid, wid, bounds, scale)) = create_overlay(
-            self.main_cid,
-            target_wid,
+        if let Some(window) = nswindow_overlay::OverlayWindow::new(
+            bounds.origin.x,
+            bounds.origin.y,
+            bounds.size.width,
+            bounds.size.height,
             self.border_width,
             self.radius,
             color,
+            self.mtm,
         ) {
-            self.overlays.insert(
-                target_wid,
-                Overlay {
-                    cid,
-                    wid,
-                    bounds,
-                    scale,
-                },
-            );
+            window.order_above(target_wid);
+            self.overlays.insert(target_wid, Overlay { window });
         }
     }
 
     fn remove_all(&mut self) {
-        let wids: Vec<u32> = self.overlays.keys().copied().collect();
-        for wid in wids {
-            self.remove(wid);
-        }
+        // OverlayWindow's Drop closes the NSWindow.
+        self.overlays.clear();
     }
 
     fn remove(&mut self, target_wid: u32) {
-        if let Some(overlay) = self.overlays.remove(&target_wid) {
-            unsafe {
-                // Move off-screen first (most reliable hide on Tahoe)
-                let offscreen = CGPoint {
-                    x: -99999.0,
-                    y: -99999.0,
-                };
-                SLSMoveWindow(overlay.cid, overlay.wid, &offscreen);
-                SLSSetWindowAlpha(overlay.cid, overlay.wid, 0.0);
-                SLSOrderWindow(overlay.cid, overlay.wid, 0, 0);
-                SLSReleaseWindow(overlay.cid, overlay.wid);
-                if overlay.cid != self.main_cid {
-                    SLSReleaseConnection(overlay.cid);
-                }
-            }
-        }
+        // OverlayWindow's Drop closes the NSWindow.
+        self.overlays.remove(&target_wid);
     }
 
     /// Reconcile a tracked overlay against its target window.
     fn sync_overlay(&mut self, target_wid: u32) -> bool {
-        let Some((overlay_cid, overlay_wid, overlay_bounds, overlay_scale)) = self
-            .overlays
-            .get(&target_wid)
-            .map(|overlay| (overlay.cid, overlay.wid, overlay.bounds, overlay.scale))
-        else {
+        if !self.overlays.contains_key(&target_wid) {
             return false;
-        };
+        }
 
+        let mut bounds = CGRect::default();
         unsafe {
-            let mut bounds = CGRect::default();
             if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
                 return false;
             }
@@ -408,42 +410,30 @@ impl BorderMap {
                 self.remove(target_wid);
                 return true;
             }
+        }
 
-            let scale = display_scale_for_bounds(bounds);
-            if size_changed(overlay_bounds, bounds) || (scale - overlay_scale).abs() > SCALE_EPSILON
-            {
+        if let Some(overlay) = self.overlays.get_mut(&target_wid) {
+            let prev = overlay.bounds();
+            if size_changed(prev, bounds) || origin_changed(prev, bounds) {
                 debug!(
-                    "[sync_overlay] target={} geometry changed bounds=({:.1},{:.1},{:.1},{:.1}) -> ({:.1},{:.1},{:.1},{:.1}) scale {:.2} -> {:.2}, recreating",
+                    "[sync_overlay] target={} geometry ({:.1},{:.1},{:.1},{:.1}) -> ({:.1},{:.1},{:.1},{:.1})",
                     target_wid,
-                    overlay_bounds.origin.x,
-                    overlay_bounds.origin.y,
-                    overlay_bounds.size.width,
-                    overlay_bounds.size.height,
+                    prev.origin.x,
+                    prev.origin.y,
+                    prev.size.width,
+                    prev.size.height,
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height
+                );
+                overlay.window.set_bounds(
                     bounds.origin.x,
                     bounds.origin.y,
                     bounds.size.width,
                     bounds.size.height,
-                    overlay_scale,
-                    scale
                 );
-                self.recreate(target_wid);
-                return true;
-            }
-
-            if origin_changed(overlay_bounds, bounds) {
-                let bw = self.border_width;
-                let origin = CGPoint {
-                    x: bounds.origin.x - bw,
-                    y: bounds.origin.y - bw,
-                };
-                SLSMoveWindow(overlay_cid, overlay_wid, &origin);
-            }
-
-            if let Some(overlay) = self.overlays.get_mut(&target_wid) {
-                overlay.bounds = bounds;
-                overlay.scale = scale;
-                overlay.cid = overlay_cid;
-                overlay.wid = overlay_wid;
+                overlay.window.order_above(target_wid);
             }
         }
 
@@ -461,33 +451,22 @@ impl BorderMap {
         changed
     }
 
-    /// Recreate overlay at new size.
+    /// With NSWindow.setFrame_display we no longer need a destroy-and-
+    /// recreate path on resize. Kept as a thin alias so existing call
+    /// sites keep working.
     fn recreate(&mut self, target_wid: u32) {
-        if !self.overlays.contains_key(&target_wid) {
-            return;
-        }
-        self.remove(target_wid);
-        self.add_fresh(target_wid);
-        if self.active_only && target_wid != self.focused_wid {
-            self.hide(target_wid);
-        }
-        self.subscribe_target(target_wid);
+        self.sync_overlay(target_wid);
     }
 
     fn hide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
-            unsafe {
-                SLSOrderWindow(o.cid, o.wid, 0, 0);
-            }
+            o.window.order_out();
         }
     }
 
     fn unhide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
-            unsafe {
-                SLSSetWindowLevel(o.cid, o.wid, 0);
-                SLSOrderWindow(o.cid, o.wid, 1, target_wid);
-            }
+            o.window.order_above(target_wid);
         }
     }
 
@@ -514,25 +493,7 @@ impl BorderMap {
     /// Redraw an existing overlay with a new color (no destroy/recreate).
     fn redraw(&self, target_wid: u32) {
         if let Some(overlay) = self.overlays.get(&target_wid) {
-            unsafe {
-                let mut bounds = CGRect::default();
-                if SLSGetWindowBounds(overlay.cid, target_wid, &mut bounds) != kCGErrorSuccess {
-                    return;
-                }
-                let bw = self.border_width;
-                let ow = bounds.size.width + 2.0 * bw;
-                let oh = bounds.size.height + 2.0 * bw;
-
-                let ctx = SLWindowContextCreate(overlay.cid, overlay.wid, ptr::null());
-                if ctx.is_null() {
-                    return;
-                }
-
-                let color = self.color_for(target_wid);
-                draw_border(ctx, ow, oh, bw, self.radius, color);
-                SLSFlushWindowContentRegion(overlay.cid, overlay.wid, ptr::null());
-                CGContextRelease(ctx);
-            }
+            overlay.window.set_color(self.color_for(target_wid));
         }
     }
 
@@ -589,14 +550,9 @@ impl BorderMap {
         }
         for (&target_wid, o) in &self.overlays {
             if target_wid == self.focused_wid {
-                unsafe {
-                    SLSSetWindowLevel(o.cid, o.wid, 0);
-                    SLSOrderWindow(o.cid, o.wid, 1, target_wid);
-                }
+                o.window.order_above(target_wid);
             } else {
-                unsafe {
-                    SLSOrderWindow(o.cid, o.wid, 0, 0);
-                }
+                o.window.order_out();
             }
         }
     }
@@ -794,6 +750,11 @@ fn main() {
 
     let active_only = args.iter().any(|s| s == "--active-only");
 
+    // Initialize NSApplication on the main thread before we touch any
+    // AppKit APIs. NSWindow operations (used by nswindow_overlay) all
+    // require a main-thread context.
+    let mtm = nswindow_overlay::init_application();
+
     let cid = unsafe { SLSMainConnectionID() };
     let own_pid = unsafe {
         let mut pid: i32 = 0;
@@ -808,7 +769,7 @@ fn main() {
     setup_event_port(cid);
 
     // Discover and create borders
-    let mut borders = BorderMap::new(cid, own_pid, border_width);
+    let mut borders = BorderMap::new(cid, own_pid, border_width, mtm);
     borders.radius = radius;
     borders.active_color = active_color;
     borders.inactive_color = inactive_color;
@@ -872,178 +833,223 @@ fn main() {
         );
     }
 
-    // Process events on background thread with coalescing
-    let running_bg = Arc::clone(&running);
-    let handle = std::thread::spawn(move || {
-        use std::collections::HashSet;
-        use std::time::{Duration, Instant};
-
-        // Persist across batches: windows we know about but haven't bordered yet.
-        // Value is the time the window was first seen — only promote after 100ms
-        // so tarmac has time to position them.
-        let mut pending: HashMap<u32, Instant> = HashMap::new();
-
-        while running_bg.load(Ordering::Relaxed) {
-            let first = match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(e) => e,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-
-            std::thread::sleep(std::time::Duration::from_millis(16));
-
-            let mut events = vec![first];
-            while let Ok(e) = rx.try_recv() {
-                events.push(e);
-            }
-
-            let mut moved: HashSet<u32> = HashSet::new();
-            let mut resized: HashSet<u32> = HashSet::new();
-            let mut destroyed: HashSet<u32> = HashSet::new();
-            let mut needs_resubscribe = false;
-
-            for event in events {
-                match event {
-                    Event::Move(wid) => {
-                        if !borders.is_overlay(wid) {
-                            moved.insert(wid);
-                        }
-                    }
-                    Event::Resize(wid) => {
-                        if !borders.is_overlay(wid) {
-                            resized.insert(wid);
-                        }
-                    }
-                    Event::Close(wid) | Event::Destroy(wid) => {
-                        if !borders.is_overlay(wid) {
-                            destroyed.insert(wid);
-                            pending.remove(&wid);
-                        }
-                    }
-                    Event::Create(wid) => {
-                        if !borders.is_overlay(wid) {
-                            pending.entry(wid).or_insert_with(Instant::now);
-                            borders.subscribe_target(wid);
-                        }
-                    }
-                    Event::Hide(wid) => borders.hide(wid),
-                    Event::Unhide(wid) => {
-                        if !borders.active_only || wid == borders.focused_wid {
-                            borders.unhide(wid);
-                        }
-                    }
-                    Event::FrontChange => {
-                        needs_resubscribe = true;
-                    }
-                    Event::SpaceChange => {
-                        needs_resubscribe = true;
-                    }
-                }
-            }
-
-            // Destroys
-            for wid in &destroyed {
-                borders.remove(*wid);
-            }
-
-            // Promote pending creates that have waited ≥100ms (tarmac positioning time)
-            let now = Instant::now();
-            let ready: Vec<u32> = pending
-                .iter()
-                .filter(|(wid, seen_at)| {
-                    !destroyed.contains(wid)
-                        && now.duration_since(**seen_at) >= Duration::from_millis(100)
-                })
-                .map(|(wid, _)| *wid)
-                .collect();
-            // Filter overlapping creates: if two windows overlap, keep smaller one
-            let mut bounds_map: Vec<(u32, CGRect)> = Vec::new();
-            for &wid in &ready {
-                unsafe {
-                    let mut b = CGRect::default();
-                    SLSGetWindowBounds(borders.main_cid, wid, &mut b);
-                    bounds_map.push((wid, b));
-                }
-            }
-
-            // If two new windows overlap closely, skip the larger one (container)
-            let mut skip: std::collections::HashSet<u32> = HashSet::new();
-            for i in 0..bounds_map.len() {
-                for j in (i + 1)..bounds_map.len() {
-                    let (wid_a, a) = &bounds_map[i];
-                    let (wid_b, b) = &bounds_map[j];
-                    if let Some(preference) = surface_preference(*a, *b) {
-                        match preference {
-                            SurfacePreference::KeepExisting => {
-                                skip.insert(*wid_b);
-                            }
-                            SurfacePreference::ReplaceExisting => {
-                                skip.insert(*wid_a);
-                            }
-                        }
-                    }
-                }
-            }
-
-            for &wid in &ready {
-                pending.remove(&wid);
-                if !skip.contains(&wid) {
-                    borders.add_fresh(wid);
-                    if borders.active_only && wid != borders.focused_wid {
-                        borders.hide(wid);
-                    }
-                    needs_resubscribe = true;
-                }
-            }
-
-            // Moves: reposition overlay (no destroy/create)
-            for wid in &moved {
-                if !resized.contains(wid) && !ready.contains(wid) && borders.sync_overlay(*wid) {
-                    needs_resubscribe = true;
-                }
-            }
-
-            // Resizes: must recreate (can't reshape windows on Tahoe)
-            // Skip windows just created this batch — already at correct size
-            for wid in &resized {
-                if !ready.contains(wid)
-                    && borders.overlays.contains_key(wid)
-                    && borders.sync_overlay(*wid)
-                {
-                    needs_resubscribe = true;
-                }
-            }
-
-            // On space change, discover windows we haven't seen yet
-            if needs_resubscribe {
-                borders.discover_untracked();
-            }
-
-            needs_resubscribe |= borders.reconcile_tracked();
-
-            // Update focus (redraws borders in-place if changed)
-            borders.update_focus();
-
-            // Re-subscribe ALL tracked windows (SLSRequestNotificationsForWindows replaces, not appends)
-            if needs_resubscribe || !destroyed.is_empty() {
-                borders.subscribe_all();
-            }
-
-            // After all processing, enforce active-only visibility
-            borders.enforce_active_only();
-        }
-
-        // Clean up all overlays before exiting
-        borders.remove_all();
+    // Process events on the main thread via a CFRunLoopTimer.
+    // BorderMap holds Retained<NSWindow> handles, which are
+    // !Send/!Sync — AppKit calls must originate from the main thread.
+    // Stash state in thread_local for the C callback to access.
+    MAIN_STATE.with(|cell| {
+        *cell.borrow_mut() = Some(MainState {
+            borders,
+            rx,
+            pending: HashMap::new(),
+            batch_events: Vec::new(),
+            batch_first_seen: None,
+        });
     });
+
+    unsafe {
+        let mut ctx = CFRunLoopTimerContext {
+            version: 0,
+            info: ptr::null_mut(),
+            retain: None,
+            release: None,
+            copy_description: None,
+        };
+        let timer = CFRunLoopTimerCreate(
+            ptr::null(),
+            CFAbsoluteTimeGetCurrent() + 0.05,
+            0.016,
+            0,
+            0,
+            timer_callback,
+            &mut ctx,
+        );
+        CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopDefaultMode);
+    }
 
     unsafe { CFRunLoopRun() };
 
-    // SIGINT received — signal background thread to stop and wait
-    running.store(false, Ordering::Relaxed);
+    // Drop everything on the main thread (NSWindow.close in Drop).
+    MAIN_STATE.with(|cell| cell.borrow_mut().take());
+
     SIGNAL_STOP_REQUESTED.store(true, Ordering::Relaxed);
     let _ = signal_watcher.join();
-    let _ = handle.join();
+    drop(running);
+}
+
+struct MainState {
+    borders: BorderMap,
+    rx: mpsc::Receiver<Event>,
+    pending: HashMap<u32, std::time::Instant>,
+    batch_events: Vec<Event>,
+    batch_first_seen: Option<std::time::Instant>,
+}
+
+thread_local! {
+    static MAIN_STATE: std::cell::RefCell<Option<MainState>> = const { std::cell::RefCell::new(None) };
+}
+
+extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi::c_void) {
+    use std::time::{Duration, Instant};
+    MAIN_STATE.with(|cell| {
+        let mut state_opt = cell.borrow_mut();
+        let s = match state_opt.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        loop {
+            match s.rx.try_recv() {
+                Ok(e) => {
+                    if s.batch_events.is_empty() {
+                        s.batch_first_seen = Some(Instant::now());
+                    }
+                    s.batch_events.push(e);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        if let Some(first_seen) = s.batch_first_seen
+            && first_seen.elapsed() >= Duration::from_millis(100)
+        {
+            let events = std::mem::take(&mut s.batch_events);
+            s.batch_first_seen = None;
+            process_event_batch(&mut s.borders, &mut s.pending, events);
+        }
+    });
+}
+
+fn process_event_batch(
+    borders: &mut BorderMap,
+    pending: &mut HashMap<u32, std::time::Instant>,
+    events: Vec<Event>,
+) {
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    let mut moved: HashSet<u32> = HashSet::new();
+    let mut resized: HashSet<u32> = HashSet::new();
+    let mut destroyed: HashSet<u32> = HashSet::new();
+    let mut needs_resubscribe = false;
+
+    for event in events {
+        match event {
+            Event::Move(wid) => {
+                if !borders.is_overlay(wid) {
+                    moved.insert(wid);
+                }
+            }
+            Event::Resize(wid) => {
+                if !borders.is_overlay(wid) {
+                    resized.insert(wid);
+                }
+            }
+            Event::Close(wid) | Event::Destroy(wid) => {
+                if !borders.is_overlay(wid) {
+                    destroyed.insert(wid);
+                    pending.remove(&wid);
+                }
+            }
+            Event::Create(wid) => {
+                if !borders.is_overlay(wid) {
+                    pending.entry(wid).or_insert_with(Instant::now);
+                    borders.subscribe_target(wid);
+                }
+            }
+            Event::Hide(wid) => borders.hide(wid),
+            Event::Unhide(wid) => {
+                if !borders.active_only || wid == borders.focused_wid {
+                    borders.unhide(wid);
+                }
+            }
+            Event::FrontChange => {
+                needs_resubscribe = true;
+            }
+            Event::SpaceChange => {
+                needs_resubscribe = true;
+            }
+        }
+    }
+
+    for wid in &destroyed {
+        borders.remove(*wid);
+    }
+
+    let now = Instant::now();
+    let ready: Vec<u32> = pending
+        .iter()
+        .filter(|(wid, seen_at)| {
+            !destroyed.contains(wid) && now.duration_since(**seen_at) >= Duration::from_millis(100)
+        })
+        .map(|(wid, _)| *wid)
+        .collect();
+
+    let mut bounds_map: Vec<(u32, CGRect)> = Vec::new();
+    for &wid in &ready {
+        unsafe {
+            let mut b = CGRect::default();
+            SLSGetWindowBounds(borders.main_cid, wid, &mut b);
+            bounds_map.push((wid, b));
+        }
+    }
+
+    let mut skip: std::collections::HashSet<u32> = HashSet::new();
+    for i in 0..bounds_map.len() {
+        for j in (i + 1)..bounds_map.len() {
+            let (wid_a, a) = &bounds_map[i];
+            let (wid_b, b) = &bounds_map[j];
+            if let Some(preference) = surface_preference(*a, *b) {
+                match preference {
+                    SurfacePreference::KeepExisting => {
+                        skip.insert(*wid_b);
+                    }
+                    SurfacePreference::ReplaceExisting => {
+                        skip.insert(*wid_a);
+                    }
+                }
+            }
+        }
+    }
+
+    for &wid in &ready {
+        pending.remove(&wid);
+        if !skip.contains(&wid) {
+            borders.add_fresh(wid);
+            if borders.active_only && wid != borders.focused_wid {
+                borders.hide(wid);
+            }
+            needs_resubscribe = true;
+        }
+    }
+
+    for wid in &moved {
+        if !resized.contains(wid) && !ready.contains(wid) && borders.sync_overlay(*wid) {
+            needs_resubscribe = true;
+        }
+    }
+
+    for wid in &resized {
+        if !ready.contains(wid)
+            && borders.overlays.contains_key(wid)
+            && borders.sync_overlay(*wid)
+        {
+            needs_resubscribe = true;
+        }
+    }
+
+    if needs_resubscribe {
+        borders.discover_untracked();
+    }
+
+    needs_resubscribe |= borders.reconcile_tracked();
+
+    borders.update_focus();
+
+    if needs_resubscribe || !destroyed.is_empty() {
+        borders.subscribe_all();
+    }
+
+    borders.enforce_active_only();
 }
 
 fn setup_event_port(cid: CGSConnectionID) {
