@@ -1227,19 +1227,6 @@ fn create_overlay(
         );
 
         SLSSetWindowResolution(cid, wid, scale);
-
-        // Tag bit 1 (kCGSIgnoreForEvents) makes the overlay click/scroll
-        // through; tag bit 9 hides it from ScreenCaptureKit (cmd+shift+4
-        // + space, screen recordings, the picker). Mirrors JankyBorders'
-        // ordering: tags MUST be set before SLWindowContextCreate /
-        // drawing — setting them post-draw poisons subsequent SLSNewWindow
-        // calls on the shared connection during stack-cycle recreates.
-        // tag_size 64 (0x40) is the SLS-documented length.
-        let set_tags: u64 = (1u64 << 1) | (1u64 << 9);
-        let clear_tags: u64 = 0;
-        SLSSetWindowTags(cid, wid, &set_tags, 64);
-        SLSClearWindowTags(cid, wid, &clear_tags, 64);
-
         SLSSetWindowOpacity(cid, wid, false);
         SLSSetWindowLevel(cid, wid, 0);
         SLSOrderWindow(cid, wid, 1, target_wid);
@@ -1255,6 +1242,24 @@ fn create_overlay(
         draw_border(ctx, ow, oh, bw, radius, color);
         SLSFlushWindowContentRegion(cid, wid, ptr::null());
         CGContextRelease(ctx);
+
+        // Click-through. Setting an empty event/hit-test shape passes
+        // mouse events through to the window beneath. We deliberately
+        // avoid SLSSetWindowTags(kCGSIgnoreForEvents): even when set
+        // before drawing on Tahoe, the tag-bit-1 flag breaks overlay
+        // visibility during the rapid sync_overlay/recreate churn that
+        // tiling produces. Empty event shape + zero event mask is the
+        // only combination that gives both click-through AND persistent
+        // borders on Tahoe.
+        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
+        let mut empty_region: CFTypeRef = ptr::null();
+        if CGSNewRegionWithRect(&empty, &mut empty_region) == kCGErrorSuccess
+            && !empty_region.is_null()
+        {
+            SLSSetWindowEventShape(cid, wid, empty_region);
+            CFRelease(empty_region);
+        }
+        SLSSetWindowEventMask(cid, wid, 0);
 
         Some((cid, wid, bounds, scale))
     }

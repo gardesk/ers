@@ -199,6 +199,13 @@ unsafe extern "C" {
     ) -> CGError;
     pub fn SLSSetWindowResolution(cid: CGSConnectionID, wid: u32, res: f64) -> CGError;
     pub fn SLSSetWindowOpacity(cid: CGSConnectionID, wid: u32, is_opaque: bool) -> CGError;
+    /// Mask of events the SLS window captures. Set to 0 to make the window
+    /// click-through (mouse events pass to the window beneath).
+    pub fn SLSSetWindowEventMask(cid: CGSConnectionID, wid: u32, mask: u32) -> CGError;
+    /// Hit-test/input shape. An empty region passes all mouse events
+    /// through to the window beneath. Equivalent to NSWindow's
+    /// `setIgnoresMouseEvents(true)` at the SLS layer.
+    pub fn SLSSetWindowEventShape(cid: CGSConnectionID, wid: u32, shape: CFTypeRef) -> CGError;
     pub fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
     pub fn SLSSetWindowBackgroundBlurRadius(cid: CGSConnectionID, wid: u32, radius: u32)
     -> CGError;
