@@ -385,8 +385,17 @@ impl BorderMap {
     }
 
     fn remove(&mut self, target_wid: u32) {
-        // OverlayWindow's Drop closes the NSWindow.
-        self.overlays.remove(&target_wid);
+        if let Some(overlay) = self.overlays.remove(&target_wid) {
+            debug!(
+                "[remove] target={} overlay_wid={} dropping NSWindow",
+                target_wid,
+                overlay.wid()
+            );
+            // OverlayWindow's Drop runs orderOut + close.
+            drop(overlay);
+        } else {
+            debug!("[remove] target={} not tracked", target_wid);
+        }
     }
 
     /// Reconcile a tracked overlay against its target window.
@@ -398,7 +407,13 @@ impl BorderMap {
         let mut bounds = CGRect::default();
         unsafe {
             if SLSGetWindowBounds(self.main_cid, target_wid, &mut bounds) != kCGErrorSuccess {
-                return false;
+                // Window is gone (destroyed). Reap the overlay.
+                debug!(
+                    "[sync_overlay] target={} SLSGetWindowBounds failed — reaping overlay",
+                    target_wid
+                );
+                self.remove(target_wid);
+                return true;
             }
 
             if !is_suitable_window(self.main_cid, target_wid) {
@@ -502,7 +517,24 @@ impl BorderMap {
     /// Detect focused window and update border colors if focus changed.
     fn update_focus(&mut self) {
         let front = get_front_window(self.own_pid);
-        if front == 0 || front == self.focused_wid {
+        if front == 0 {
+            return;
+        }
+        if front == self.focused_wid {
+            // Same focus as last poll. But a freshly-spawned window may
+            // have been focused before its SLS state was complete enough
+            // to pass the add_fresh filter — retry on every poll until
+            // it sticks.
+            if !self.overlays.contains_key(&front) {
+                debug!("[focus-retry] front={} still untracked, retrying add_fresh", front);
+                self.add_fresh(front);
+                if self.overlays.contains_key(&front) {
+                    self.subscribe_target(front);
+                    if self.active_only {
+                        self.unhide(front);
+                    }
+                }
+            }
             return;
         }
 
@@ -987,6 +1019,15 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
             // FrontChange notification doesn't strand the active border.
             // Cheap operation when focus hasn't changed.
             s.borders.update_focus();
+            // Once per second, reconcile tracked overlays against
+            // current SLS state. Catches missed Close/Destroy events
+            // that would otherwise leave a dead border on screen.
+            if tick % 60 == 0 && tick > 0 {
+                let removed = s.borders.reconcile_tracked();
+                if removed {
+                    debug!("[timer] periodic reconcile removed stale overlays");
+                }
+            }
         }
     });
 }
@@ -1018,6 +1059,7 @@ fn process_event_batch(
             }
             Event::Close(wid) | Event::Destroy(wid) => {
                 if !borders.is_overlay(wid) {
+                    debug!("[event] Close/Destroy target_wid={}", wid);
                     destroyed.insert(wid);
                     pending.remove(&wid);
                 }
