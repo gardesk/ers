@@ -481,7 +481,7 @@ unsafe extern "C" {
         allocator: CFAllocatorRef,
         fire_date: f64,
         interval: f64,
-        flags: u32,
+        flags: u64,
         order: i64,
         callout: extern "C" fn(*mut c_void, *mut c_void),
         context: *mut CFRunLoopTimerContext,

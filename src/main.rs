@@ -508,12 +508,25 @@ impl BorderMap {
 
         let old = self.focused_wid;
         self.focused_wid = front;
+
+        // tarmac-style workspace switching can swap focus to a window
+        // that wasn't visible (and therefore not discovered) at ers
+        // startup. Discover_windows only enumerates on-current-space
+        // windows; tarmac stages other workspaces' windows in a hidden
+        // state ers never picked up. If focus lands on such a wid,
+        // create an overlay for it on demand.
+        let new_target = !self.overlays.contains_key(&front);
         debug!(
-            "[focus] {} -> {} (tracked targets: {:?})",
+            "[focus] {} -> {} {}(tracked targets: {:?})",
             old,
             front,
+            if new_target { "[NEW] " } else { "" },
             self.overlays.keys().collect::<Vec<_>>()
         );
+        if new_target {
+            self.add_fresh(front);
+            self.subscribe_target(front);
+        }
 
         // Pull both overlays' positions to the targets' current SLS bounds
         // before un/hiding. AX-driven moves during a stack cycle frequently
@@ -722,10 +735,31 @@ fn print_help() {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
+    // On the screenshot-exclusion research branch, default to file
+    // logging at debug level so we can diagnose the NSWindow refactor
+    // even when ers is spawned by tarmac (which inherits ers's stderr
+    // to wherever tarmac was launched, often invisibly).
+    let log_path = std::path::PathBuf::from("/tmp/ers-debug.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ers=debug"));
+    if let Some(file) = log_file {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .init();
+    }
+    debug!("[main] ers starting, pid={}", std::process::id());
 
     let args: Vec<String> = std::env::args().collect();
 
@@ -866,8 +900,8 @@ fn main() {
             ptr::null(),
             CFAbsoluteTimeGetCurrent() + 0.05,
             0.016,
-            0,
-            0,
+            0u64,
+            0i64,
             timer_callback,
             &mut ctx,
         );
@@ -898,12 +932,22 @@ thread_local! {
 
 extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi::c_void) {
     use std::time::{Duration, Instant};
+    use std::sync::atomic::AtomicUsize;
+    static TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
+    let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+    if tick == 0 {
+        debug!("[timer] first fire — main-thread event loop is alive");
+    } else if tick % 600 == 0 {
+        // every ~10s if interval is 16ms
+        debug!("[timer] tick {}", tick);
+    }
     MAIN_STATE.with(|cell| {
         let mut state_opt = cell.borrow_mut();
         let s = match state_opt.as_mut() {
             Some(s) => s,
             None => return,
         };
+        let mut received = 0usize;
         loop {
             match s.rx.try_recv() {
                 Ok(e) => {
@@ -911,17 +955,38 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
                         s.batch_first_seen = Some(Instant::now());
                     }
                     s.batch_events.push(e);
+                    received += 1;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
-        if let Some(first_seen) = s.batch_first_seen
-            && first_seen.elapsed() >= Duration::from_millis(100)
-        {
+        if received > 0 {
+            debug!(
+                "[timer] received {} new events; batch size now {}",
+                received,
+                s.batch_events.len()
+            );
+        }
+        // Process the accumulated batch after a 16ms quiet window
+        // (matches the old bg-thread behavior where it slept 16ms after
+        // the first event then drained). Events keep arriving, the batch
+        // grows; once 16ms passes without new events we flush.
+        let should_flush = s.batch_first_seen.is_some_and(|t| {
+            t.elapsed() >= Duration::from_millis(16) && received == 0
+        }) || s
+            .batch_first_seen
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(120));
+        if should_flush {
             let events = std::mem::take(&mut s.batch_events);
             s.batch_first_seen = None;
+            debug!("[timer] processing batch of {}", events.len());
             process_event_batch(&mut s.borders, &mut s.pending, events);
+        } else {
+            // Even with no events, poll focus periodically so a missed
+            // FrontChange notification doesn't strand the active border.
+            // Cheap operation when focus hasn't changed.
+            s.borders.update_focus();
         }
     });
 }
@@ -965,8 +1030,14 @@ fn process_event_batch(
             }
             Event::Hide(wid) => borders.hide(wid),
             Event::Unhide(wid) => {
-                if !borders.active_only || wid == borders.focused_wid {
-                    borders.unhide(wid);
+                if !borders.is_overlay(wid) {
+                    if !borders.overlays.contains_key(&wid) {
+                        borders.add_fresh(wid);
+                        borders.subscribe_target(wid);
+                    }
+                    if !borders.active_only || wid == borders.focused_wid {
+                        borders.unhide(wid);
+                    }
                 }
             }
             Event::FrontChange => {
