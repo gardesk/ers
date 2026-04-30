@@ -427,6 +427,9 @@ impl BorderMap {
             }
         }
 
+        let active_only = self.active_only;
+        let focused = self.focused_wid;
+
         if let Some(overlay) = self.overlays.get_mut(&target_wid) {
             let prev = overlay.bounds();
             if size_changed(prev, bounds) || origin_changed(prev, bounds) {
@@ -448,7 +451,14 @@ impl BorderMap {
                     bounds.size.width,
                     bounds.size.height,
                 );
-                overlay.window.order_above(target_wid);
+                // orderWindow:relativeTo: re-shows an off-screen window
+                // as a side effect. In active_only mode, non-focused
+                // overlays must remain hidden — otherwise stack peek
+                // positions cause every stacked window's overlay to
+                // pop onto the screen as their bounds shift.
+                if !active_only || target_wid == focused {
+                    overlay.window.order_above(target_wid);
+                }
             }
         }
 
