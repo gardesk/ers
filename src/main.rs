@@ -476,6 +476,37 @@ impl BorderMap {
         changed
     }
 
+    /// Re-apply set_bounds for every tracked overlay even when the
+    /// stored CG bounds match the current SLS bounds. After a display
+    /// reconfiguration the cocoa frame depends on the (possibly new)
+    /// primary screen height, so unchanged CG bounds still need their
+    /// cocoa frame recomputed.
+    fn reconcile_all_force(&mut self) {
+        let tracked: Vec<u32> = self.overlays.keys().copied().collect();
+        let active_only = self.active_only;
+        let focused = self.focused_wid;
+        for wid in tracked {
+            let mut bounds = CGRect::default();
+            unsafe {
+                if SLSGetWindowBounds(self.main_cid, wid, &mut bounds) != kCGErrorSuccess {
+                    self.remove(wid);
+                    continue;
+                }
+            }
+            if let Some(overlay) = self.overlays.get_mut(&wid) {
+                overlay.window.set_bounds(
+                    bounds.origin.x,
+                    bounds.origin.y,
+                    bounds.size.width,
+                    bounds.size.height,
+                );
+                if !active_only || wid == focused {
+                    overlay.window.order_above(wid);
+                }
+            }
+        }
+    }
+
     /// With NSWindow.setFrame_display we no longer need a destroy-and-
     /// recreate path on resize. Kept as a thin alias so existing call
     /// sites keep working.
@@ -838,6 +869,7 @@ fn main() {
     // require a main-thread context.
     let mtm = nswindow_overlay::init_application();
     nswindow_overlay::log_screens(mtm);
+    register_display_hotplug_callback();
 
     let cid = unsafe { SLSMainConnectionID() };
     let own_pid = unsafe {
@@ -1181,6 +1213,36 @@ fn process_event_batch(
     }
 
     borders.enforce_active_only();
+}
+
+/// Re-log the screen layout when the display configuration changes
+/// (monitor plug/unplug, resolution change). The callback also nudges
+/// every tracked overlay to re-fetch its bounds so any cached cocoa Y
+/// computed against the old primary height gets refreshed.
+unsafe extern "C" fn display_reconfig_callback(
+    display_id: u32,
+    flags: u32,
+    _user_info: *mut std::ffi::c_void,
+) {
+    debug!(display_id, flags, "[hotplug] CGDisplay reconfiguration");
+    if let Some(mtm) = objc2::MainThreadMarker::new() {
+        nswindow_overlay::log_screens(mtm);
+    }
+    MAIN_STATE.with(|cell| {
+        if let Some(s) = cell.borrow_mut().as_mut() {
+            s.borders.reconcile_all_force();
+        }
+    });
+}
+
+fn register_display_hotplug_callback() {
+    unsafe {
+        let rc = CGDisplayRegisterReconfigurationCallback(
+            Some(display_reconfig_callback),
+            std::ptr::null_mut(),
+        );
+        debug!("[hotplug] register CGDisplayReconfiguration rc={}", rc);
+    }
 }
 
 fn setup_event_port(cid: CGSConnectionID) {

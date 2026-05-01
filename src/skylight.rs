@@ -504,6 +504,17 @@ unsafe extern "C" {
     pub static mach_task_self_: u32;
 }
 
+// --- CGDisplay hotplug callback ---
+
+unsafe extern "C" {
+    pub fn CGDisplayRegisterReconfigurationCallback(
+        callback: Option<
+            unsafe extern "C" fn(display: u32, flags: u32, user_info: *mut std::ffi::c_void),
+        >,
+        user_info: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
 pub fn mach_task_self() -> u32 {
     unsafe { mach_task_self_ }
 }
