@@ -213,6 +213,10 @@ impl OverlayWindow {
             CGSize::new(w + 2.0 * self.border_width, h + 2.0 * self.border_width),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
+        self.window.setFrame_display(cocoa_frame, true);
+        let actual = self.window.frame();
+        let ok = (actual.origin.x - cocoa_frame.origin.x).abs() < 0.5
+            && (actual.origin.y - cocoa_frame.origin.y).abs() < 0.5;
         tracing::debug!(
             cg_x = outer_cg.origin.x,
             cg_y = outer_cg.origin.y,
@@ -220,11 +224,13 @@ impl OverlayWindow {
             cg_h = outer_cg.size.height,
             cocoa_x = cocoa_frame.origin.x,
             cocoa_y = cocoa_frame.origin.y,
-            cocoa_w = cocoa_frame.size.width,
-            cocoa_h = cocoa_frame.size.height,
+            actual_x = actual.origin.x,
+            actual_y = actual.origin.y,
+            actual_w = actual.size.width,
+            actual_h = actual.size.height,
+            placed_correctly = ok,
             "set_bounds"
         );
-        self.window.setFrame_display(cocoa_frame, true);
         // Update the border path to match new size.
         unsafe {
             let path = objc2_core_graphics::CGPath::with_rounded_rect(
