@@ -28,31 +28,21 @@ const NS_FLOATING_WINDOW_LEVEL: isize = 3;
 /// Top-left Y in CG global coordinates becomes bottom-left Y in Cocoa
 /// global coordinates by subtracting from the primary screen height.
 ///
-/// The "primary" screen is the one whose Cocoa frame origin is (0, 0) —
-/// by definition the bottom-left of the menu-bar screen, which is the
-/// shared anchor between CG (top-left) and Cocoa (bottom-left) global
-/// coordinates. `[NSScreen screens][0]` is documented as the primary
-/// but isn't reliable on every macOS version, so we look it up by
-/// origin instead.
-fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
-    let screens = NSScreen::screens(mtm);
-    let count = screens.count();
-    for i in 0..count {
-        let s = screens.objectAtIndex(i);
-        let f = s.frame();
-        if f.origin.x.abs() < 0.5 && f.origin.y.abs() < 0.5 {
-            return f.size.height;
-        }
-    }
-    if count > 0 {
-        screens.objectAtIndex(0).frame().size.height
-    } else {
-        0.0
+/// We use the main CGDisplay's bounds rather than `NSScreen.screens`
+/// because NSScreen caches and only refreshes on certain notifications
+/// — when a monitor is plugged or unplugged, NSScreen.screens can
+/// return stale primary-height values, causing every cocoa Y on the
+/// new layout to be off by the difference. CGDisplayBounds reflects
+/// the current state immediately.
+fn primary_screen_height() -> f64 {
+    unsafe {
+        let main_id = objc2_core_graphics::CGMainDisplayID();
+        objc2_core_graphics::CGDisplayBounds(main_id).size.height
     }
 }
 
-fn cg_to_cocoa_frame(cg: CGRect, mtm: MainThreadMarker) -> CGRect {
-    let primary_height = primary_screen_height(mtm);
+fn cg_to_cocoa_frame(cg: CGRect, _mtm: MainThreadMarker) -> CGRect {
+    let primary_height = primary_screen_height();
     let cocoa_y = primary_height - cg.origin.y - cg.size.height;
     CGRect::new(
         CGPoint::new(cg.origin.x, cocoa_y),
@@ -64,11 +54,19 @@ fn cg_to_cocoa_frame(cg: CGRect, mtm: MainThreadMarker) -> CGRect {
 /// multi-monitor coordinate issues.
 pub fn log_screens(mtm: MainThreadMarker) {
     let screens = NSScreen::screens(mtm);
-    let primary_h = primary_screen_height(mtm);
+    let primary_h = primary_screen_height();
+    let cg_main_bounds = unsafe {
+        let id = objc2_core_graphics::CGMainDisplayID();
+        objc2_core_graphics::CGDisplayBounds(id)
+    };
     tracing::debug!(
-        primary_height = primary_h,
-        count = screens.count(),
-        "NSScreen layout"
+        cg_primary_height = primary_h,
+        cg_main_x = cg_main_bounds.origin.x,
+        cg_main_y = cg_main_bounds.origin.y,
+        cg_main_w = cg_main_bounds.size.width,
+        cg_main_h = cg_main_bounds.size.height,
+        nsscreen_count = screens.count(),
+        "screen layout"
     );
     for i in 0..screens.count() {
         let s = screens.objectAtIndex(i);
@@ -79,7 +77,7 @@ pub fn log_screens(mtm: MainThreadMarker) {
             cocoa_y = f.origin.y,
             w = f.size.width,
             h = f.size.height,
-            "screen"
+            "nsscreen"
         );
     }
 }

@@ -40,4 +40,5 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGColor",
     "CGColorSpace",
     "CGPath",
+    "CGDirectDisplay",
 ] }
