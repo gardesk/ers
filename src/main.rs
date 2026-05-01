@@ -837,6 +837,7 @@ fn main() {
     // AppKit APIs. NSWindow operations (used by nswindow_overlay) all
     // require a main-thread context.
     let mtm = nswindow_overlay::init_application();
+    nswindow_overlay::log_screens(mtm);
 
     let cid = unsafe { SLSMainConnectionID() };
     let own_pid = unsafe {

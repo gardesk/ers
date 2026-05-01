@@ -27,18 +27,61 @@ const NS_FLOATING_WINDOW_LEVEL: isize = 3;
 
 /// Top-left Y in CG global coordinates becomes bottom-left Y in Cocoa
 /// global coordinates by subtracting from the primary screen height.
-fn cg_to_cocoa_frame(cg: CGRect, mtm: MainThreadMarker) -> CGRect {
+///
+/// The "primary" screen is the one whose Cocoa frame origin is (0, 0) —
+/// by definition the bottom-left of the menu-bar screen, which is the
+/// shared anchor between CG (top-left) and Cocoa (bottom-left) global
+/// coordinates. `[NSScreen screens][0]` is documented as the primary
+/// but isn't reliable on every macOS version, so we look it up by
+/// origin instead.
+fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
     let screens = NSScreen::screens(mtm);
-    let primary_height = if screens.count() > 0 {
+    let count = screens.count();
+    for i in 0..count {
+        let s = screens.objectAtIndex(i);
+        let f = s.frame();
+        if f.origin.x.abs() < 0.5 && f.origin.y.abs() < 0.5 {
+            return f.size.height;
+        }
+    }
+    if count > 0 {
         screens.objectAtIndex(0).frame().size.height
     } else {
         0.0
-    };
+    }
+}
+
+fn cg_to_cocoa_frame(cg: CGRect, mtm: MainThreadMarker) -> CGRect {
+    let primary_height = primary_screen_height(mtm);
     let cocoa_y = primary_height - cg.origin.y - cg.size.height;
     CGRect::new(
         CGPoint::new(cg.origin.x, cocoa_y),
         CGSize::new(cg.size.width, cg.size.height),
     )
+}
+
+/// Log all NSScreens and which one we'll treat as primary. Helps diagnose
+/// multi-monitor coordinate issues.
+pub fn log_screens(mtm: MainThreadMarker) {
+    let screens = NSScreen::screens(mtm);
+    let primary_h = primary_screen_height(mtm);
+    tracing::debug!(
+        primary_height = primary_h,
+        count = screens.count(),
+        "NSScreen layout"
+    );
+    for i in 0..screens.count() {
+        let s = screens.objectAtIndex(i);
+        let f = s.frame();
+        tracing::debug!(
+            index = i,
+            cocoa_x = f.origin.x,
+            cocoa_y = f.origin.y,
+            w = f.size.width,
+            h = f.size.height,
+            "screen"
+        );
+    }
 }
 
 /// Initialize NSApplication. Must be called once from the main thread.
@@ -172,6 +215,17 @@ impl OverlayWindow {
             CGSize::new(w + 2.0 * self.border_width, h + 2.0 * self.border_width),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
+        tracing::debug!(
+            cg_x = outer_cg.origin.x,
+            cg_y = outer_cg.origin.y,
+            cg_w = outer_cg.size.width,
+            cg_h = outer_cg.size.height,
+            cocoa_x = cocoa_frame.origin.x,
+            cocoa_y = cocoa_frame.origin.y,
+            cocoa_w = cocoa_frame.size.width,
+            cocoa_h = cocoa_frame.size.height,
+            "set_bounds"
+        );
         self.window.setFrame_display(cocoa_frame, true);
         // Update the border path to match new size.
         unsafe {
