@@ -476,6 +476,17 @@ impl BorderMap {
         changed
     }
 
+    /// Re-apply each overlay's CAShapeLayer geometry. Called on a slow
+    /// periodic schedule (and on hotplug) to repair layer state that
+    /// macOS occasionally resets during display sleep/wake without
+    /// changing the NSWindow's frame — sync_overlay won't fix it on
+    /// its own because the SLS bounds match what we already stored.
+    fn refresh_all_layers(&self) {
+        for overlay in self.overlays.values() {
+            overlay.window.reapply_layer();
+        }
+    }
+
     /// Re-apply set_bounds for every tracked overlay even when the
     /// stored CG bounds match the current SLS bounds. After a display
     /// reconfiguration the cocoa frame depends on the (possibly new)
@@ -1070,6 +1081,11 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
                 if removed {
                     debug!("[timer] periodic reconcile removed stale overlays");
                 }
+                // Cheap: re-applies just the CAShapeLayer frame/path
+                // for every overlay. Recovers from layer state that
+                // macOS resets during display sleep/wake without
+                // touching the NSWindow frame.
+                s.borders.refresh_all_layers();
             }
         }
     });
@@ -1231,6 +1247,7 @@ unsafe extern "C" fn display_reconfig_callback(
     MAIN_STATE.with(|cell| {
         if let Some(s) = cell.borrow_mut().as_mut() {
             s.borders.reconcile_all_force();
+            s.borders.refresh_all_layers();
         }
     });
 }

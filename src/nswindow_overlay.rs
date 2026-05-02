@@ -253,6 +253,32 @@ impl OverlayWindow {
         self.bounds_cg_h = h;
     }
 
+    /// Re-apply just the CAShapeLayer's frame and path to match the
+    /// current stored bounds. Cheap — no NSWindow setFrame. Useful when
+    /// macOS resets layer state during display sleep/wake but the
+    /// NSWindow's frame survives (in which case sync_overlay won't see
+    /// any CG bounds change and won't re-apply state on its own).
+    pub fn reapply_layer(&self) {
+        let outer_w = self.bounds_cg_w + 2.0 * self.border_width;
+        let outer_h = self.bounds_cg_h + 2.0 * self.border_width;
+        let outer_size = CGSize::new(outer_w, outer_h);
+        unsafe {
+            let path = objc2_core_graphics::CGPath::with_rounded_rect(
+                inset_for_stroke(outer_size, self.border_width),
+                self.radius,
+                self.radius,
+                ptr::null(),
+            );
+            let path_ref: *mut AnyObject =
+                objc2_core_foundation::CFRetained::as_ptr(&path).as_ptr() as *mut AnyObject;
+            let _: () = msg_send![&*self.border_layer, setPath: path_ref];
+            self.border_layer.setFrame(CGRect::new(
+                CGPoint::new(0.0, 0.0),
+                CGSize::new(outer_w, outer_h),
+            ));
+        }
+    }
+
     pub fn set_color(&self, color: (f64, f64, f64, f64)) {
         unsafe {
             let stroke = make_cgcolor(color, self.mtm);
