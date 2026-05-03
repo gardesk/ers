@@ -16,7 +16,6 @@ use tracing::debug;
 static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const MIN_TRACKED_WINDOW_SIZE: f64 = 4.0;
 const GEOMETRY_EPSILON: f64 = 0.5;
-const SCALE_EPSILON: f64 = 0.01;
 const WINDOW_ATTRIBUTE_REAL: u64 = 1 << 1;
 const WINDOW_TAG_DOCUMENT: u64 = 1 << 0;
 const WINDOW_TAG_FLOATING: u64 = 1 << 1;
@@ -189,59 +188,6 @@ unsafe extern "C" fn handle_sigint(_: libc::c_int) {
     SIGNAL_STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-fn display_scale_for_bounds(bounds: CGRect) -> f64 {
-    let point = CGPoint {
-        x: bounds.origin.x + bounds.size.width / 2.0,
-        y: bounds.origin.y + bounds.size.height / 2.0,
-    };
-
-    unsafe {
-        let mut display_id = 0u32;
-        let mut count = 0u32;
-        if CGGetDisplaysWithPoint(point, 1, &mut display_id, &mut count) != kCGErrorSuccess
-            || count == 0
-        {
-            return 2.0;
-        }
-
-        let mode = CGDisplayCopyDisplayMode(display_id);
-        if mode.is_null() {
-            return 2.0;
-        }
-
-        let width = CGDisplayModeGetWidth(mode) as f64;
-        let height = CGDisplayModeGetHeight(mode) as f64;
-        let pixel_width = CGDisplayModeGetPixelWidth(mode) as f64;
-        let pixel_height = CGDisplayModeGetPixelHeight(mode) as f64;
-        CFRelease(mode as CFTypeRef);
-
-        let scale_x = if width > 0.0 {
-            pixel_width / width
-        } else {
-            0.0
-        };
-        let scale_y = if height > 0.0 {
-            pixel_height / height
-        } else {
-            0.0
-        };
-
-        let scale = match (scale_x.is_finite(), scale_y.is_finite()) {
-            (true, true) if scale_x >= 1.0 && scale_y >= 1.0 => (scale_x + scale_y) / 2.0,
-            (true, _) if scale_x >= 1.0 => scale_x,
-            (_, true) if scale_y >= 1.0 => scale_y,
-            _ => 2.0,
-        };
-
-        debug!(
-            "[display_scale] display={} point=({:.1},{:.1}) scale={:.2}",
-            display_id, point.x, point.y, scale
-        );
-
-        scale
-    }
-}
-
 /// Tracks overlays for target windows.
 struct BorderMap {
     overlays: HashMap<u32, Overlay>,
@@ -379,11 +325,6 @@ impl BorderMap {
         }
     }
 
-    fn remove_all(&mut self) {
-        // OverlayWindow's Drop closes the NSWindow.
-        self.overlays.clear();
-    }
-
     fn remove(&mut self, target_wid: u32) {
         if let Some(overlay) = self.overlays.remove(&target_wid) {
             debug!(
@@ -518,13 +459,6 @@ impl BorderMap {
         }
     }
 
-    /// With NSWindow.setFrame_display we no longer need a destroy-and-
-    /// recreate path on resize. Kept as a thin alias so existing call
-    /// sites keep working.
-    fn recreate(&mut self, target_wid: u32) {
-        self.sync_overlay(target_wid);
-    }
-
     fn hide(&self, target_wid: u32) {
         if let Some(o) = self.overlays.get(&target_wid) {
             debug!("[hide] target={} overlay_wid={}", target_wid, o.wid());
@@ -578,9 +512,9 @@ impl BorderMap {
             // to pass the add_fresh filter — retry on every poll until
             // it sticks.
             if !self.overlays.contains_key(&front) {
-                debug!("[focus-retry] front={} still untracked, retrying add_fresh", front);
                 self.add_fresh(front);
                 if self.overlays.contains_key(&front) {
+                    debug!("[focus-retry] front={} now tracked", front);
                     self.subscribe_target(front);
                     if self.active_only {
                         self.unhide(front);
@@ -819,30 +753,12 @@ fn print_help() {
 }
 
 fn main() {
-    // On the screenshot-exclusion research branch, default to file
-    // logging at debug level so we can diagnose the NSWindow refactor
-    // even when ers is spawned by tarmac (which inherits ers's stderr
-    // to wherever tarmac was launched, often invisibly).
-    let log_path = std::path::PathBuf::from("/tmp/ers-debug.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .ok();
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ers=debug"));
-    if let Some(file) = log_file {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::sync::Mutex::new(file))
-            .with_ansi(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .init();
-    }
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ers=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
+        .init();
     debug!("[main] ers starting, pid={}", std::process::id());
 
     let args: Vec<String> = std::env::args().collect();
@@ -1304,68 +1220,6 @@ unsafe extern "C" fn drain_events(
     }
 }
 
-/// Look up an overlay window in CGWindowListCopyWindowInfo and dump the
-/// keys that the screenshot picker / ScreenCaptureKit care about. Lets
-/// us tell whether SLSSetWindowSharingState(0) propagates through to
-/// the CG window list (the layer SCWindow filters on) or stops at SLS.
-fn probe_cg_window_info(target_wid: u32) {
-    unsafe {
-        let list = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
-        if list.is_null() {
-            debug!("[probe_cg_window_info] wid={target_wid} list is null");
-            return;
-        }
-        let count = CFArrayGetCount(list);
-        let wid_key = cf_string_from_static(c"kCGWindowNumber");
-        let sharing_key = cf_string_from_static(c"kCGWindowSharingState");
-        let layer_key = cf_string_from_static(c"kCGWindowLayer");
-        let alpha_key = cf_string_from_static(c"kCGWindowAlpha");
-        let on_screen_key = cf_string_from_static(c"kCGWindowIsOnscreen");
-        let mut found = false;
-
-        for i in 0..count {
-            let dict = CFArrayGetValueAtIndex(list, i);
-            if dict.is_null() {
-                continue;
-            }
-            let mut v: CFTypeRef = ptr::null();
-            let mut wid: u32 = 0;
-            if CFDictionaryGetValueIfPresent(dict, wid_key as CFTypeRef, &mut v) {
-                CFNumberGetValue(v, kCFNumberSInt32Type, &mut wid as *mut _ as *mut _);
-            }
-            if wid != target_wid {
-                continue;
-            }
-
-            let mut sharing: i32 = -1;
-            if CFDictionaryGetValueIfPresent(dict, sharing_key as CFTypeRef, &mut v) {
-                CFNumberGetValue(v, kCFNumberSInt32Type, &mut sharing as *mut _ as *mut _);
-            }
-            let mut layer: i32 = i32::MIN;
-            if CFDictionaryGetValueIfPresent(dict, layer_key as CFTypeRef, &mut v) {
-                CFNumberGetValue(v, kCFNumberSInt32Type, &mut layer as *mut _ as *mut _);
-            }
-            let mut alpha: f64 = -1.0;
-            if CFDictionaryGetValueIfPresent(dict, alpha_key as CFTypeRef, &mut v) {
-                CFNumberGetValue(v, 13 /* kCFNumberDoubleType */, &mut alpha as *mut _ as *mut _);
-            }
-            let on_screen_present =
-                CFDictionaryGetValueIfPresent(dict, on_screen_key as CFTypeRef, &mut v);
-
-            debug!(
-                "[probe_cg_window_info] wid={target_wid} cg_sharing={sharing} layer={layer} alpha={alpha:.3} on_screen_present={on_screen_present}"
-            );
-            found = true;
-            break;
-        }
-
-        if !found {
-            debug!("[probe_cg_window_info] wid={target_wid} NOT FOUND in CGWindowList");
-        }
-        CFRelease(list as CFTypeRef);
-    }
-}
-
 fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
     unsafe {
         let list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
@@ -1422,181 +1276,6 @@ fn discover_windows(cid: CGSConnectionID, own_pid: i32) -> Vec<u32> {
         CFRelease(layer_key as CFTypeRef);
         CFRelease(list);
         wids
-    }
-}
-
-/// Draw a border ring into an existing CGContext, clearing first.
-fn draw_border(
-    ctx: CGContextRef,
-    width: f64,
-    height: f64,
-    border_width: f64,
-    radius: f64,
-    color: (f64, f64, f64, f64),
-) {
-    unsafe {
-        let full = CGRect::new(0.0, 0.0, width, height);
-        CGContextClearRect(ctx, full);
-
-        let bw = border_width;
-        let stroke_rect = CGRect::new(bw / 2.0, bw / 2.0, width - bw, height - bw);
-        let max_r = (stroke_rect.size.width.min(stroke_rect.size.height) / 2.0).max(0.0);
-        let r = radius.min(max_r);
-
-        CGContextSetRGBStrokeColor(ctx, color.0, color.1, color.2, color.3);
-        CGContextSetLineWidth(ctx, bw);
-        let path = CGPathCreateWithRoundedRect(stroke_rect, r, r, ptr::null());
-        if !path.is_null() {
-            CGContextAddPath(ctx, path);
-            CGContextStrokePath(ctx);
-            CGPathRelease(path);
-        }
-        CGContextFlush(ctx);
-    }
-}
-
-fn create_overlay(
-    cid: CGSConnectionID,
-    target_wid: u32,
-    border_width: f64,
-    radius: f64,
-    color: (f64, f64, f64, f64),
-) -> Option<(CGSConnectionID, u32, CGRect, f64)> {
-    unsafe {
-        let mut bounds = CGRect::default();
-        let rc = SLSGetWindowBounds(cid, target_wid, &mut bounds);
-        if rc != kCGErrorSuccess {
-            debug!("[create_overlay] SLSGetWindowBounds failed for wid={target_wid} rc={rc}");
-            return None;
-        }
-        if !is_trackable_window(bounds, border_width) {
-            debug!(
-                "[create_overlay] wid={target_wid} too small: {}x{}",
-                bounds.size.width, bounds.size.height
-            );
-            return None;
-        }
-
-        let bw = border_width;
-        let ow = bounds.size.width + 2.0 * bw;
-        let oh = bounds.size.height + 2.0 * bw;
-        let ox = bounds.origin.x - bw;
-        let oy = bounds.origin.y - bw;
-        let scale = display_scale_for_bounds(bounds);
-
-        let frame = CGRect::new(0.0, 0.0, ow, oh);
-        let mut region: CFTypeRef = ptr::null();
-        CGSNewRegionWithRect(&frame, &mut region);
-        if region.is_null() {
-            debug!("[create_overlay] CGSNewRegionWithRect failed for wid={target_wid}");
-            return None;
-        }
-
-        // Empty hit-test shape: an SLS window with an empty opaque_shape
-        // is click-through at the compositor level (no input region).
-        let empty = CGRect::new(0.0, 0.0, 0.0, 0.0);
-        let mut empty_region: CFTypeRef = ptr::null();
-        if CGSNewRegionWithRect(&empty, &mut empty_region) != kCGErrorSuccess
-            || empty_region.is_null()
-        {
-            debug!("[create_overlay] CGSNewRegionWithRect (empty) failed for wid={target_wid}");
-            CFRelease(region);
-            return None;
-        }
-
-        // Create the overlay via SLSNewWindowWithOpaqueShapeAndContext
-        // and bake tag bit 1 (click-through) and tag bit 9 (screenshot
-        // exclusion) into the window at birth. Tahoe classifies windows
-        // for capture/picker based on tags observed at creation time;
-        // post-creation tag mutation lands too late and the picker keeps
-        // including the overlay. Mirrors the JankyBorders unmanaged
-        // create path (.refs/JankyBorders/src/misc/window.h:239).
-        // options 13|(1<<18): documentation-window | ignores-cycle.
-        let mut tags: u64 = (1u64 << 1) | (1u64 << 9);
-        let mut wid: u32 = 0;
-        SLSNewWindowWithOpaqueShapeAndContext(
-            cid,
-            2,
-            region,
-            empty_region,
-            13 | (1 << 18),
-            &mut tags as *mut u64,
-            ox as f32,
-            oy as f32,
-            64,
-            &mut wid,
-            ptr::null_mut(),
-        );
-        CFRelease(region);
-        CFRelease(empty_region);
-        if wid == 0 {
-            debug!(
-                "[create_overlay] SLSNewWindowWithOpaqueShapeAndContext returned 0 for target={target_wid} cid={cid}"
-            );
-            return None;
-        }
-
-        debug!(
-            "[create_overlay] created overlay wid={wid} for target={target_wid} scale={scale:.2} color=({:.2},{:.2},{:.2},{:.2})",
-            color.0, color.1, color.2, color.3
-        );
-
-        if let Some(metadata) = query_window_metadata(cid, wid) {
-            debug!(
-                "[create_overlay] post-create overlay wid={wid} tags={:#x} attributes={:#x} parent={}",
-                metadata.tags, metadata.attributes, metadata.parent_wid
-            );
-        } else {
-            debug!("[create_overlay] post-create wid={wid} metadata query failed");
-        }
-
-        SLSSetWindowSharingState(cid, wid, 0);
-        let mut sharing_state: u32 = u32::MAX;
-        let rc = SLSGetWindowSharingState(cid, wid, &mut sharing_state);
-        debug!("[create_overlay] sharing_state wid={wid} get_rc={rc} sls_state={sharing_state}");
-
-        // Probe what CGWindowListCopyWindowInfo (which the screenshot
-        // picker / SCWindow use) reports for our overlay. If
-        // kCGWindowSharingState comes back != 0 here, then SLS-side
-        // sharing state is not propagated to the CG window list and
-        // we'll need a different exclusion mechanism.
-        probe_cg_window_info(wid);
-
-        SLSSetWindowResolution(cid, wid, scale);
-        SLSSetWindowOpacity(cid, wid, false);
-        SLSSetWindowLevel(cid, wid, 0);
-        SLSOrderWindow(cid, wid, 1, target_wid);
-
-        // Draw border (point coordinates)
-        let ctx = SLWindowContextCreate(cid, wid, ptr::null());
-        if ctx.is_null() {
-            debug!("[create_overlay] SLWindowContextCreate returned null for overlay wid={wid}");
-            SLSReleaseWindow(cid, wid);
-            return None;
-        }
-
-        draw_border(ctx, ow, oh, bw, radius, color);
-        SLSFlushWindowContentRegion(cid, wid, ptr::null());
-        CGContextRelease(ctx);
-
-        // Post-creation tag mutation matching JankyBorders' pattern
-        // at .refs/JankyBorders/src/misc/window.h:266-267. Verified
-        // ineffective on Tahoe: tags set on windows owned by a
-        // SLSNewConnection-created cid do NOT propagate to the global
-        // server-side tag store, regardless of which cid issues the
-        // SLSSetWindowTags call (tested both fresh and main cid).
-        // The screencaptureui picker queries via _CGSGetWindowTags
-        // from its own connection (otool confirmed) and reads 0x0 for
-        // our overlays. Kept here aligned with JB so the diff is
-        // legible; the actual fix requires creating overlays on the
-        // process main cid (conflicts with the per-border fresh-cid
-        // requirement in ers/CLAUDE.md) or backing them with NSWindow.
-        let mut set_tags: u64 = (1u64 << 1) | (1u64 << 9);
-        let mut clear_tags: u64 = 0;
-        SLSSetWindowTags(cid, wid, &mut set_tags as *mut u64, 64);
-        SLSClearWindowTags(cid, wid, &mut clear_tags as *mut u64, 64);
-
-        Some((cid, wid, bounds, scale))
     }
 }
 

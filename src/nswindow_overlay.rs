@@ -14,7 +14,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{ClassType, MainThreadMarker, MainThreadOnly, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSWindow,
     NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
@@ -35,10 +35,8 @@ const NS_FLOATING_WINDOW_LEVEL: isize = 3;
 /// new layout to be off by the difference. CGDisplayBounds reflects
 /// the current state immediately.
 fn primary_screen_height() -> f64 {
-    unsafe {
-        let main_id = objc2_core_graphics::CGMainDisplayID();
-        objc2_core_graphics::CGDisplayBounds(main_id).size.height
-    }
+    let main_id = objc2_core_graphics::CGMainDisplayID();
+    objc2_core_graphics::CGDisplayBounds(main_id).size.height
 }
 
 fn cg_to_cocoa_frame(cg: CGRect, _mtm: MainThreadMarker) -> CGRect {
@@ -55,7 +53,7 @@ fn cg_to_cocoa_frame(cg: CGRect, _mtm: MainThreadMarker) -> CGRect {
 pub fn log_screens(mtm: MainThreadMarker) {
     let screens = NSScreen::screens(mtm);
     let primary_h = primary_screen_height();
-    let cg_main_bounds = unsafe {
+    let cg_main_bounds = {
         let id = objc2_core_graphics::CGMainDisplayID();
         objc2_core_graphics::CGDisplayBounds(id)
     };
@@ -154,8 +152,8 @@ impl OverlayWindow {
                 | NSWindowCollectionBehavior::FullScreenAuxiliary,
         );
         // Clear background.
-        let clear = unsafe { NSColor::clearColor() };
-        unsafe { window.setBackgroundColor(Some(&clear)) };
+        let clear = NSColor::clearColor();
+        window.setBackgroundColor(Some(&clear));
 
         let content_view = window.contentView()?;
         content_view.setWantsLayer(true);
@@ -164,7 +162,7 @@ impl OverlayWindow {
             layer?
         };
 
-        let border_layer = unsafe { CAShapeLayer::new() };
+        let border_layer = CAShapeLayer::new();
         let path_rect = inset_for_stroke(outer_cg.size, border_width);
         unsafe {
             let path = objc2_core_graphics::CGPath::with_rounded_rect(
@@ -215,22 +213,17 @@ impl OverlayWindow {
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
         self.window.setFrame_display(cocoa_frame, true);
         let actual = self.window.frame();
-        let ok = (actual.origin.x - cocoa_frame.origin.x).abs() < 0.5
+        let placed_correctly = (actual.origin.x - cocoa_frame.origin.x).abs() < 0.5
             && (actual.origin.y - cocoa_frame.origin.y).abs() < 0.5;
-        tracing::debug!(
-            cg_x = outer_cg.origin.x,
-            cg_y = outer_cg.origin.y,
-            cg_w = outer_cg.size.width,
-            cg_h = outer_cg.size.height,
-            cocoa_x = cocoa_frame.origin.x,
-            cocoa_y = cocoa_frame.origin.y,
-            actual_x = actual.origin.x,
-            actual_y = actual.origin.y,
-            actual_w = actual.size.width,
-            actual_h = actual.size.height,
-            placed_correctly = ok,
-            "set_bounds"
-        );
+        if !placed_correctly {
+            tracing::warn!(
+                requested_x = cocoa_frame.origin.x,
+                requested_y = cocoa_frame.origin.y,
+                actual_x = actual.origin.x,
+                actual_y = actual.origin.y,
+                "NSWindow rejected setFrame placement"
+            );
+        }
         // Update the border path to match new size.
         unsafe {
             let path = objc2_core_graphics::CGPath::with_rounded_rect(
@@ -296,10 +289,6 @@ impl OverlayWindow {
     pub fn order_out(&self) {
         self.window.orderOut(None);
     }
-
-    pub fn set_alpha(&self, alpha: f64) {
-        self.window.setAlphaValue(alpha);
-    }
 }
 
 impl Drop for OverlayWindow {
@@ -332,5 +321,5 @@ fn make_cgcolor(
     rgba: (f64, f64, f64, f64),
     _mtm: MainThreadMarker,
 ) -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGColor> {
-    unsafe { objc2_core_graphics::CGColor::new_srgb(rgba.0, rgba.1, rgba.2, rgba.3) }
+    objc2_core_graphics::CGColor::new_srgb(rgba.0, rgba.1, rgba.2, rgba.3)
 }
