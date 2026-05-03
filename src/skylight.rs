@@ -101,7 +101,17 @@ pub type CFNumberRef = *const c_void;
 pub type CFMachPortRef = *const c_void;
 pub type CFRunLoopSourceRef = *const c_void;
 pub type CFRunLoopRef = *const c_void;
+pub type CFRunLoopTimerRef = *const c_void;
 pub type CFAllocatorRef = *const c_void;
+
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: i64,
+    pub info: *mut c_void,
+    pub retain: Option<extern "C" fn(*const c_void) -> *const c_void>,
+    pub release: Option<extern "C" fn(*const c_void)>,
+    pub copy_description: Option<extern "C" fn(*const c_void) -> CFStringRef>,
+}
 pub type CGContextRef = *mut c_void;
 pub type CGPathRef = *const c_void;
 pub type CGMutablePathRef = *mut c_void;
@@ -175,6 +185,26 @@ unsafe extern "C" {
         region: CFTypeRef,
         wid_out: *mut u32,
     ) -> CGError;
+    /// JankyBorders' `SLSNewWindowWithOpaqueShapeAndContext` — creates a
+    /// window with a custom hit-test shape and tag bits applied at
+    /// creation. Used so that screenshot-exclusion tag bit 9 lands on
+    /// the window before macOS Tahoe's compositor classifies it; setting
+    /// the bit post-creation is unreliable on Tahoe.
+    /// Reference: .refs/JankyBorders/src/misc/window.h:239
+    /// Reference: .refs/JankyBorders/src/misc/extern.h
+    pub fn SLSNewWindowWithOpaqueShapeAndContext(
+        cid: CGSConnectionID,
+        window_type: i32,
+        region: CFTypeRef,
+        opaque_shape: CFTypeRef,
+        options: i32,
+        tags: *mut u64,
+        x: f32,
+        y: f32,
+        tag_size: i32,
+        wid_out: *mut u32,
+        context: *mut std::ffi::c_void,
+    ) -> CGError;
     pub fn SLSReleaseWindow(cid: CGSConnectionID, wid: u32) -> CGError;
 
     // Window properties
@@ -190,6 +220,12 @@ unsafe extern "C" {
         tags: *const u64,
         tag_size: i32,
     ) -> CGError;
+    pub fn CGSGetWindowTags(
+        cid: CGSConnectionID,
+        wid: u32,
+        tags: *mut u64,
+        tag_size: i32,
+    ) -> CGError;
     pub fn SLSSetWindowShape(
         cid: CGSConnectionID,
         wid: u32,
@@ -199,6 +235,15 @@ unsafe extern "C" {
     ) -> CGError;
     pub fn SLSSetWindowResolution(cid: CGSConnectionID, wid: u32, res: f64) -> CGError;
     pub fn SLSSetWindowOpacity(cid: CGSConnectionID, wid: u32, is_opaque: bool) -> CGError;
+    /// SLS-level NSWindow.sharingType. Values: 0 = None (excluded from
+    /// screen capture / picker / recording — equivalent to
+    /// kCGWindowSharingNone), 1 = ReadOnly, 2 = ReadWrite.
+    pub fn SLSSetWindowSharingState(cid: CGSConnectionID, wid: u32, state: u32) -> CGError;
+    pub fn SLSGetWindowSharingState(
+        cid: CGSConnectionID,
+        wid: u32,
+        state_out: *mut u32,
+    ) -> CGError;
     /// Mask of events the SLS window captures. Set to 0 to make the window
     /// click-through (mouse events pass to the window beneath).
     pub fn SLSSetWindowEventMask(cid: CGSConnectionID, wid: u32, mask: u32) -> CGError;
@@ -432,6 +477,18 @@ unsafe extern "C" {
     pub fn CFRunLoopStop(rl: CFRunLoopRef);
     pub fn CFRunLoopWakeUp(rl: CFRunLoopRef);
 
+    pub fn CFRunLoopTimerCreate(
+        allocator: CFAllocatorRef,
+        fire_date: f64,
+        interval: f64,
+        flags: u64,
+        order: i64,
+        callout: extern "C" fn(*mut c_void, *mut c_void),
+        context: *mut CFRunLoopTimerContext,
+    ) -> CFRunLoopTimerRef;
+    pub fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: CFRunLoopTimerRef, mode: CFStringRef);
+    pub fn CFAbsoluteTimeGetCurrent() -> f64;
+
     pub static kCFAllocatorDefault: CFAllocatorRef;
     pub static kCFTypeDictionaryKeyCallBacks: c_void;
     pub static kCFTypeDictionaryValueCallBacks: c_void;
@@ -445,6 +502,17 @@ unsafe extern "C" {
     pub fn getpid() -> i32;
     pub fn pid_for_task(task: u32, pid: *mut i32) -> i32;
     pub static mach_task_self_: u32;
+}
+
+// --- CGDisplay hotplug callback ---
+
+unsafe extern "C" {
+    pub fn CGDisplayRegisterReconfigurationCallback(
+        callback: Option<
+            unsafe extern "C" fn(display: u32, flags: u32, user_info: *mut std::ffi::c_void),
+        >,
+        user_info: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 pub fn mach_task_self() -> u32 {
