@@ -11,7 +11,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, trace};
 
 static SIGNAL_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 const MIN_TRACKED_WINDOW_SIZE: f64 = 4.0;
@@ -169,7 +169,7 @@ fn is_suitable_window(cid: CGSConnectionID, wid: u32) -> bool {
         Some(metadata) => {
             let suitable = is_suitable_window_metadata(metadata);
             if !suitable {
-                debug!(
+                trace!(
                     "[window_filter] rejecting wid={} parent={} tags={:#x} attributes={:#x}",
                     wid, metadata.parent_wid, metadata.tags, metadata.attributes
                 );
