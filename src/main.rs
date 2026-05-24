@@ -974,11 +974,17 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
         // (matches the old bg-thread behavior where it slept 16ms after
         // the first event then drained). Events keep arriving, the batch
         // grows; once 16ms passes without new events we flush.
+        //
+        // Cap dropped from 120ms → 32ms (perf-audit #124): during a
+        // tarmac retile the events stream continuously so the quiet
+        // branch never fires and we'd otherwise wait the full cap before
+        // flushing. 32ms keeps coalescing benefits for storm bursts but
+        // bounds worst-case latency to ~2 frames at 60Hz.
         let should_flush = s.batch_first_seen.is_some_and(|t| {
             t.elapsed() >= Duration::from_millis(16) && received == 0
         }) || s
             .batch_first_seen
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(120));
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(32));
         if should_flush {
             let events = std::mem::take(&mut s.batch_events);
             s.batch_first_seen = None;
