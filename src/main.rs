@@ -1151,8 +1151,12 @@ fn process_event_batch(
         borders.discover_untracked();
     }
 
-    needs_resubscribe |= borders.reconcile_tracked();
-
+    // Perf audit #129: reconcile_tracked walks every overlay's bounds
+    // via SLS just to drop entries the WindowServer no longer reports.
+    // The periodic 1Hz reconciler in the timer callback already covers
+    // steady-state drift; running it after every event flush double-
+    // dipped on the cost (and duplicated work the targeted move/resize
+    // arms above already did for the active wids).
     borders.update_focus();
 
     if needs_resubscribe || !destroyed.is_empty() {
