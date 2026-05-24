@@ -898,10 +898,17 @@ fn main() {
             release: None,
             copy_description: None,
         };
+        // Tick at 4 ms (was 16 ms). Perf audit #125: SLS notifications
+        // arrive on the main thread via CFMachPort and just push into
+        // the mpsc channel; the timer wakes the main loop to drain.
+        // The 16 ms interval added up to a full frame of latency on top
+        // of the batch quiet window. 4 ms keeps wakeups cheap while
+        // bounding the receive-to-process gap to ~one display refresh
+        // step.
         let timer = CFRunLoopTimerCreate(
             ptr::null(),
             CFAbsoluteTimeGetCurrent() + 0.05,
-            0.016,
+            0.004,
             0u64,
             0i64,
             timer_callback,
@@ -939,8 +946,8 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     if tick == 0 {
         debug!("[timer] first fire — main-thread event loop is alive");
-    } else if tick % 600 == 0 {
-        // every ~10s if interval is 16ms
+    } else if tick % 2500 == 0 {
+        // every ~10s at 4ms interval (perf audit #125)
         debug!("[timer] tick {}", tick);
     }
     MAIN_STATE.with(|cell| {
@@ -998,7 +1005,9 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
             // Once per second, reconcile tracked overlays against
             // current SLS state. Catches missed Close/Destroy events
             // that would otherwise leave a dead border on screen.
-            if tick % 60 == 0 && tick > 0 {
+            // (Tick interval is 4ms after perf audit #125, so 250 ticks
+            // ≈ 1s. Previously 60 ticks at 16ms.)
+            if tick % 250 == 0 && tick > 0 {
                 let removed = s.borders.reconcile_tracked();
                 if removed {
                     debug!("[timer] periodic reconcile removed stale overlays");
