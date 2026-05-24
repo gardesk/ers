@@ -546,19 +546,28 @@ impl BorderMap {
             self.subscribe_target(front);
         }
 
-        // Pull both overlays' positions to the targets' current SLS bounds
-        // before un/hiding. AX-driven moves during a stack cycle frequently
-        // don't fire SLS WINDOW_MOVE notifications, so a stored overlay
-        // can be at stale coordinates. SLSGetWindowBounds (inside
-        // sync_overlay) is real-time and doesn't wait for a notification.
-        self.sync_overlay(old);
+        // Pull overlays' positions to current SLS bounds before un/hiding.
+        // AX-driven moves during a stack cycle frequently don't fire SLS
+        // WINDOW_MOVE notifications, so a stored overlay can be at stale
+        // coordinates. SLSGetWindowBounds (inside sync_overlay) is real-
+        // time and doesn't wait for a notification.
+        //
+        // Perf audit #133: in active_only mode `old` is about to be
+        // ordered out of view, so its synced bounds and recolor are
+        // wasted (the user never sees them). Skip both for `old` when
+        // active_only, and only redraw the previously-focused overlay
+        // when it'll actually be visible.
         self.sync_overlay(front);
+        if !self.active_only {
+            self.sync_overlay(old);
+        }
 
         if self.active_only {
             self.hide(old);
             self.unhide(front);
+        } else {
+            self.redraw(old);
         }
-        self.redraw(old);
         self.redraw(front);
     }
 
