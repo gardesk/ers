@@ -14,7 +14,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{MainThreadMarker, MainThreadOnly, msg_send};
+use objc2::{MainThreadMarker, MainThreadOnly, class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSWindow,
     NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
@@ -211,21 +211,20 @@ impl OverlayWindow {
             CGSize::new(w + 2.0 * self.border_width, h + 2.0 * self.border_width),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
-        self.window.setFrame_display(cocoa_frame, true);
-        let actual = self.window.frame();
-        let placed_correctly = (actual.origin.x - cocoa_frame.origin.x).abs() < 0.5
-            && (actual.origin.y - cocoa_frame.origin.y).abs() < 0.5;
-        if !placed_correctly {
-            tracing::warn!(
-                requested_x = cocoa_frame.origin.x,
-                requested_y = cocoa_frame.origin.y,
-                actual_x = actual.origin.x,
-                actual_y = actual.origin.y,
-                "NSWindow rejected setFrame placement"
-            );
-        }
-        // Update the border path to match new size.
+        // Perf audit #127: setFrame display:NO instead of YES. YES forces
+        // a synchronous WindowServer round-trip; NO queues the frame for
+        // the next runloop pass. For overlays with a single CAShapeLayer
+        // we're driving directly below, the sync round-trip is wasted.
+        // Wrap the layer mutations in a CATransaction with
+        // disableActions:YES so they snap instantly instead of running
+        // CA's default ~0.25s implicit animation (which would make the
+        // border tween visibly behind the moving window).
+        // Audit #132: drop the post-setFrame readback verification — it
+        // was a second sync round-trip per call just to log a warning.
         unsafe {
+            let _: () = msg_send![class!(CATransaction), begin];
+            let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+            self.window.setFrame_display(cocoa_frame, false);
             let path = objc2_core_graphics::CGPath::with_rounded_rect(
                 inset_for_stroke(outer_cg.size, self.border_width),
                 self.radius,
@@ -239,6 +238,7 @@ impl OverlayWindow {
                 CGPoint::new(0.0, 0.0),
                 CGSize::new(outer_cg.size.width, outer_cg.size.height),
             ));
+            let _: () = msg_send![class!(CATransaction), commit];
         }
         self.bounds_cg_x = x;
         self.bounds_cg_y = y;
