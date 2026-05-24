@@ -211,6 +211,13 @@ impl OverlayWindow {
             CGSize::new(w + 2.0 * self.border_width, h + 2.0 * self.border_width),
         );
         let cocoa_frame = cg_to_cocoa_frame(outer_cg, self.mtm);
+        // Perf audit #131: the CAShapeLayer path geometry only depends
+        // on size, not origin. During a pure window translation (drag,
+        // most layout-shift outcomes), size is identical frame-to-frame
+        // and rebuilding the rounded-rect CGPath + setPath would just
+        // throw away an identical path. Skip when w/h match cached.
+        let size_unchanged = (self.bounds_cg_w - w).abs() < 0.5
+            && (self.bounds_cg_h - h).abs() < 0.5;
         // Perf audit #127: setFrame display:NO instead of YES. YES forces
         // a synchronous WindowServer round-trip; NO queues the frame for
         // the next runloop pass. For overlays with a single CAShapeLayer
@@ -225,19 +232,21 @@ impl OverlayWindow {
             let _: () = msg_send![class!(CATransaction), begin];
             let _: () = msg_send![class!(CATransaction), setDisableActions: true];
             self.window.setFrame_display(cocoa_frame, false);
-            let path = objc2_core_graphics::CGPath::with_rounded_rect(
-                inset_for_stroke(outer_cg.size, self.border_width),
-                self.radius,
-                self.radius,
-                ptr::null(),
-            );
-            let path_ref: *mut AnyObject =
-                objc2_core_foundation::CFRetained::as_ptr(&path).as_ptr() as *mut AnyObject;
-            let _: () = msg_send![&*self.border_layer, setPath: path_ref];
-            self.border_layer.setFrame(CGRect::new(
-                CGPoint::new(0.0, 0.0),
-                CGSize::new(outer_cg.size.width, outer_cg.size.height),
-            ));
+            if !size_unchanged {
+                let path = objc2_core_graphics::CGPath::with_rounded_rect(
+                    inset_for_stroke(outer_cg.size, self.border_width),
+                    self.radius,
+                    self.radius,
+                    ptr::null(),
+                );
+                let path_ref: *mut AnyObject =
+                    objc2_core_foundation::CFRetained::as_ptr(&path).as_ptr() as *mut AnyObject;
+                let _: () = msg_send![&*self.border_layer, setPath: path_ref];
+                self.border_layer.setFrame(CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(outer_cg.size.width, outer_cg.size.height),
+                ));
+            }
             let _: () = msg_send![class!(CATransaction), commit];
         }
         self.bounds_cg_x = x;
