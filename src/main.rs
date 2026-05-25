@@ -1095,18 +1095,38 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
             None => return,
         };
         let mut received = 0usize;
+        // Tarmac-driven events bypass the batch coalescer entirely:
+        // they're explicit user actions (one focus/move per keypress),
+        // not SLS storm noise — coalescing buys nothing and the
+        // 32ms-cap wait is pure latency. Drain them into an immediate
+        // bucket and apply *inline* before deciding whether the SLS
+        // batch needs to wait.
+        let mut immediate: Vec<Event> = Vec::new();
         loop {
             match s.rx.try_recv() {
                 Ok(e) => {
-                    if s.batch_events.is_empty() {
-                        s.batch_first_seen = Some(Instant::now());
-                    }
-                    s.batch_events.push(e);
                     received += 1;
+                    match e {
+                        Event::TarmacFocus(_) | Event::TarmacMove { .. } => {
+                            immediate.push(e);
+                        }
+                        _ => {
+                            if s.batch_events.is_empty() {
+                                s.batch_first_seen = Some(Instant::now());
+                            }
+                            s.batch_events.push(e);
+                        }
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
+        }
+        if !immediate.is_empty() {
+            // Hand the inline bucket straight to process_event_batch
+            // — same code path as a normal flush, just without the
+            // 16/32ms wait.
+            process_event_batch(&mut s.borders, &mut s.pending, immediate);
         }
         if received > 0 {
             debug!(
