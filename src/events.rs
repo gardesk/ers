@@ -27,6 +27,14 @@ pub enum Event {
     Destroy(u32),
     SpaceChange,
     FrontChange,
+    /// Perf #135: tarmac → ers control-channel hint. Tarmac knows
+    /// synchronously which window it just focused (from its BSP tree);
+    /// SLS's FrontChange notification is async and can lag, and AX-
+    /// driven focus changes (stack cycling) often don't fire SLS Front
+    /// events at all. This variant carries the focused wid directly so
+    /// ers can update the border immediately without waiting for the
+    /// next reconcile tick.
+    TarmacFocus(u32),
 }
 
 static TX: OnceLock<mpsc::Sender<Event>> = OnceLock::new();
@@ -41,6 +49,13 @@ fn send(event: Event) {
     if let Some(tx) = TX.get() {
         let _ = tx.send(event);
     }
+}
+
+/// Perf #135: external entry point for the tarmac control-channel
+/// reader thread. Pushes an event into the same mpsc the SLS notify
+/// handlers feed; the main-thread timer drains both sources together.
+pub fn push(event: Event) {
+    send(event);
 }
 
 fn is_own_window(cid: CGSConnectionID, wid: u32) -> bool {

@@ -503,6 +503,16 @@ impl BorderMap {
     /// Detect focused window and update border colors if focus changed.
     fn update_focus(&mut self) {
         let front = get_front_window(self.own_pid);
+        self.transition_focus_to(front);
+    }
+
+    /// Perf #135: tarmac → ers focus hint. Same transition logic as
+    /// `update_focus`, but takes the target wid directly instead of
+    /// polling `get_front_window`. Used when tarmac pushes a focus
+    /// command over its stdin pipe — bypasses the SLS FrontChange
+    /// notification latency and covers AX-driven focus that doesn't
+    /// fire SLS Front at all.
+    fn transition_focus_to(&mut self, front: u32) {
         if front == 0 {
             return;
         }
@@ -820,6 +830,56 @@ fn main() {
     events::register(cid);
     setup_event_port(cid);
 
+    // Perf #135: tarmac drives ers via stdin commands now. The control
+    // channel lets tarmac push focus/move/destroy hints synchronously
+    // (it already knows them from its BSP tree); ers folds them into
+    // the same event pipeline the SLS notify handlers feed. Lets us
+    // bypass the SLS round-trip for things tarmac already knows, and
+    // covers AX-driven moves where SLS doesn't even fire a Move event.
+    std::thread::spawn(|| {
+        use std::io::{BufRead, BufReader};
+        let stdin = std::io::stdin();
+        let mut reader = BufReader::new(stdin.lock());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    // EOF — tarmac closed the pipe. Nothing more to do.
+                    debug!("[ipc] stdin closed; ending control-channel reader");
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!("[ipc] stdin read error: {e}; ending reader");
+                    return;
+                }
+            }
+            let cmd = line.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            // Protocol: whitespace-tokenised, "<verb> <args...>".
+            //   focus <wid>        — wid became focused (0 = clear)
+            //   move <wid>         — wid moved or resized; re-sync
+            //   destroy <wid>      — wid is gone; drop the overlay
+            let mut parts = cmd.split_whitespace();
+            let verb = match parts.next() {
+                Some(v) => v,
+                None => continue,
+            };
+            let arg = parts.next().and_then(|s| s.parse::<u32>().ok());
+            match (verb, arg) {
+                ("focus", Some(wid)) => events::push(events::Event::TarmacFocus(wid)),
+                ("move", Some(wid)) => events::push(events::Event::Move(wid)),
+                ("destroy", Some(wid)) => events::push(events::Event::Destroy(wid)),
+                _ => {
+                    debug!("[ipc] unknown command: {cmd:?}");
+                }
+            }
+        }
+    });
+
     // Discover and create borders
     let mut borders = BorderMap::new(cid, own_pid, border_width, mtm);
     borders.radius = radius;
@@ -1086,6 +1146,13 @@ fn process_event_batch(
             }
             Event::SpaceChange => {
                 needs_resubscribe = true;
+            }
+            Event::TarmacFocus(wid) => {
+                // Perf #135: tarmac pushed an explicit focus target.
+                // Apply directly — don't wait for SLS to notice.
+                if !borders.is_overlay(wid) {
+                    borders.transition_focus_to(wid);
+                }
             }
         }
     }
