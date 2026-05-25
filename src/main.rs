@@ -884,6 +884,7 @@ fn main() {
         let stdin = std::io::stdin();
         let mut reader = BufReader::new(stdin.lock());
         let mut line = String::new();
+        debug!("[ipc] stdin reader thread started");
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -902,6 +903,7 @@ fn main() {
             if cmd.is_empty() {
                 continue;
             }
+            debug!("[ipc] rx: {cmd:?}");
             // Protocol: whitespace-tokenised, "<verb> <args...>".
             //   focus <wid>                       — wid became focused
             //                                       (0 = clear)
