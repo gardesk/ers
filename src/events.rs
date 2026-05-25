@@ -35,6 +35,22 @@ pub enum Event {
     /// ers can update the border immediately without waiting for the
     /// next reconcile tick.
     TarmacFocus(u32),
+    /// Perf #135 follow-on: tarmac → ers geometry push. The original
+    /// `Event::Move(wid)` told ers a window moved but required ers to
+    /// query SLSGetWindowBounds to find the new position — which
+    /// returned STALE data because tarmac's AX position writes are
+    /// async and SLS lagged ~800ms behind. This variant carries the
+    /// target CG bounds directly so ers can snap the border to where
+    /// tarmac *intends* the window to be, without waiting for SLS.
+    /// (x, y, w, h in CG top-left coords; ers's set_bounds inflates by
+    /// border_width.)
+    TarmacMove {
+        wid: u32,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    },
 }
 
 static TX: OnceLock<mpsc::Sender<Event>> = OnceLock::new();

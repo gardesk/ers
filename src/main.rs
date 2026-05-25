@@ -406,6 +406,49 @@ impl BorderMap {
         false
     }
 
+    /// Perf #135 follow-on: snap the overlay for `target_wid` to the
+    /// given CG bounds directly, without querying SLS. Tarmac calls
+    /// this via the stdin protocol when it knows the target tile
+    /// rect synchronously — SLS still lags ~hundreds of ms behind
+    /// tarmac's AX writes, so the SLS-driven sync_overlay path would
+    /// either render the border at the OLD position or wait until SLS
+    /// catches up. Snapping to tarmac's intent makes the border tight
+    /// to the user's input.
+    ///
+    /// If the actual window lands somewhere different (misbehaving
+    /// app rejects the resize), the subsequent SLS Move notification
+    /// triggers sync_overlay and corrects.
+    fn apply_overlay_bounds(&mut self, target_wid: u32, x: f64, y: f64, w: f64, h: f64) {
+        let active_only = self.active_only;
+        let focused = self.focused_wid;
+        let Some(overlay) = self.overlays.get_mut(&target_wid) else {
+            // Untracked — tarmac may be ahead of ers's discovery.
+            // Let the standard sync_overlay path pick it up on the
+            // next SLS Move notification.
+            return;
+        };
+        let prev = overlay.bounds();
+        let want = CGRect::new(x, y, w, h);
+        if size_changed(prev, want) || origin_changed(prev, want) {
+            debug!(
+                "[tarmac_move] target={} geometry ({:.1},{:.1},{:.1},{:.1}) -> ({:.1},{:.1},{:.1},{:.1})",
+                target_wid,
+                prev.origin.x,
+                prev.origin.y,
+                prev.size.width,
+                prev.size.height,
+                x,
+                y,
+                w,
+                h
+            );
+            overlay.window.set_bounds(x, y, w, h);
+            if !active_only || target_wid == focused {
+                overlay.window.order_above(target_wid);
+            }
+        }
+    }
+
     fn reconcile_tracked(&mut self) -> bool {
         let tracked: Vec<u32> = self.overlays.keys().copied().collect();
         let mut changed = false;
@@ -860,19 +903,45 @@ fn main() {
                 continue;
             }
             // Protocol: whitespace-tokenised, "<verb> <args...>".
-            //   focus <wid>        — wid became focused (0 = clear)
-            //   move <wid>         — wid moved or resized; re-sync
-            //   destroy <wid>      — wid is gone; drop the overlay
+            //   focus <wid>                       — wid became focused
+            //                                       (0 = clear)
+            //   move <wid> <x> <y> <w> <h>        — target CG bounds for
+            //                                       wid (perf #135 follow-on:
+            //                                       bypass SLS lag by
+            //                                       snapping border to
+            //                                       tarmac's intent)
+            //   destroy <wid>                     — drop the overlay
             let mut parts = cmd.split_whitespace();
             let verb = match parts.next() {
                 Some(v) => v,
                 None => continue,
             };
-            let arg = parts.next().and_then(|s| s.parse::<u32>().ok());
-            match (verb, arg) {
-                ("focus", Some(wid)) => events::push(events::Event::TarmacFocus(wid)),
-                ("move", Some(wid)) => events::push(events::Event::Move(wid)),
-                ("destroy", Some(wid)) => events::push(events::Event::Destroy(wid)),
+            match verb {
+                "focus" => {
+                    if let Some(wid) = parts.next().and_then(|s| s.parse::<u32>().ok()) {
+                        events::push(events::Event::TarmacFocus(wid));
+                    }
+                }
+                "destroy" => {
+                    if let Some(wid) = parts.next().and_then(|s| s.parse::<u32>().ok()) {
+                        events::push(events::Event::Destroy(wid));
+                    }
+                }
+                "move" => {
+                    let wid = parts.next().and_then(|s| s.parse::<u32>().ok());
+                    let x = parts.next().and_then(|s| s.parse::<f64>().ok());
+                    let y = parts.next().and_then(|s| s.parse::<f64>().ok());
+                    let w = parts.next().and_then(|s| s.parse::<f64>().ok());
+                    let h = parts.next().and_then(|s| s.parse::<f64>().ok());
+                    match (wid, x, y, w, h) {
+                        (Some(wid), Some(x), Some(y), Some(w), Some(h)) => {
+                            events::push(events::Event::TarmacMove { wid, x, y, w, h });
+                        }
+                        _ => {
+                            debug!("[ipc] malformed move: {cmd:?}");
+                        }
+                    }
+                }
                 _ => {
                     debug!("[ipc] unknown command: {cmd:?}");
                 }
@@ -1152,6 +1221,21 @@ fn process_event_batch(
                 // Apply directly — don't wait for SLS to notice.
                 if !borders.is_overlay(wid) {
                     borders.transition_focus_to(wid);
+                }
+            }
+            Event::TarmacMove { wid, x, y, w, h } => {
+                // Perf #135 follow-on: tarmac pushed the target CG
+                // bounds directly. Snap the border to where tarmac
+                // *intends* the window to be — don't poll SLS, which
+                // lags ~800ms behind tarmac's AX writes.
+                //
+                // SLS Move notifications still arrive later and route
+                // through `moved` below; if the app actually lands
+                // somewhere different (misbehaving apps that reject
+                // resize, etc.) the border corrects via the standard
+                // sync_overlay path.
+                if !borders.is_overlay(wid) {
+                    borders.apply_overlay_bounds(wid, x, y, w, h);
                 }
             }
         }
