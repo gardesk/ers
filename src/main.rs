@@ -199,6 +199,10 @@ struct BorderMap {
     active_color: (f64, f64, f64, f64),
     inactive_color: (f64, f64, f64, f64),
     active_only: bool,
+    /// While set (after a tarmac `focus` hint), the OS front-window poll
+    /// in update_focus is skipped — the batch-tail poll used to revert a
+    /// fresh TarmacFocus hint to whatever SLS transiently reported.
+    tarmac_focus_grace: Option<std::time::Instant>,
     mtm: objc2::MainThreadMarker,
 }
 
@@ -220,6 +224,7 @@ impl BorderMap {
             active_color: (0.32, 0.58, 0.89, 1.0),   // #5294e2
             inactive_color: (0.35, 0.35, 0.35, 0.8), // dim gray
             active_only: false,
+            tarmac_focus_grace: None,
         }
     }
 
@@ -545,8 +550,41 @@ impl BorderMap {
 
     /// Detect focused window and update border colors if focus changed.
     fn update_focus(&mut self) {
+        // A fresh tarmac focus hint outranks the OS poll: SLS's front
+        // window lags AX-driven focus and transiently reports stale
+        // wids, reverting the hint the moment the batch tail runs.
+        if let Some(until) = self.tarmac_focus_grace {
+            if std::time::Instant::now() < until {
+                return;
+            }
+            self.tarmac_focus_grace = None;
+        }
         let front = get_front_window(self.own_pid);
         self.transition_focus_to(front);
+    }
+
+    /// Arm the OS-poll grace window after any tarmac focus hint.
+    fn arm_tarmac_focus_grace(&mut self) {
+        self.tarmac_focus_grace =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(750));
+    }
+
+    /// tarmac pushed `focus 0`: no focused window (e.g. an empty
+    /// workspace). Hide the focused overlay instead of leaving its
+    /// border ringing a window that isn't there.
+    fn clear_focus(&mut self) {
+        let old = self.focused_wid;
+        if old == 0 {
+            return;
+        }
+        self.focused_wid = 0;
+        debug!("[focus] {} -> none (tarmac focus 0)", old);
+        if self.active_only {
+            self.hide(old);
+        } else {
+            self.sync_overlay(old);
+            self.redraw(old);
+        }
     }
 
     /// Perf #135: tarmac → ers focus hint. Same transition logic as
@@ -1240,9 +1278,15 @@ fn process_event_batch(
             }
             Event::TarmacFocus(wid) => {
                 // Perf #135: tarmac pushed an explicit focus target.
-                // Apply directly — don't wait for SLS to notice.
-                if !borders.is_overlay(wid) {
+                // Apply directly — don't wait for SLS to notice — and
+                // arm the grace window so the batch-tail OS poll can't
+                // immediately revert it.
+                if wid == 0 {
+                    borders.clear_focus();
+                    borders.arm_tarmac_focus_grace();
+                } else if !borders.is_overlay(wid) {
                     borders.transition_focus_to(wid);
+                    borders.arm_tarmac_focus_grace();
                 }
             }
             Event::TarmacMove { wid, x, y, w, h } => {
