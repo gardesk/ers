@@ -1,8 +1,8 @@
 //! ers — window border renderer
 
 mod events;
-mod skylight;
 mod nswindow_overlay;
+mod skylight;
 
 use events::Event;
 use skylight::*;
@@ -1118,8 +1118,8 @@ thread_local! {
 }
 
 extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi::c_void) {
-    use std::time::{Duration, Instant};
     use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
     static TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
     let tick = TICK_COUNT.fetch_add(1, Ordering::Relaxed);
     if tick == 0 {
@@ -1185,11 +1185,11 @@ extern "C" fn timer_callback(_timer: *mut std::ffi::c_void, _info: *mut std::ffi
         // branch never fires and we'd otherwise wait the full cap before
         // flushing. 32ms keeps coalescing benefits for storm bursts but
         // bounds worst-case latency to ~2 frames at 60Hz.
-        let should_flush = s.batch_first_seen.is_some_and(|t| {
-            t.elapsed() >= Duration::from_millis(16) && received == 0
-        }) || s
+        let should_flush = s
             .batch_first_seen
-            .is_some_and(|t| t.elapsed() >= Duration::from_millis(32));
+            .is_some_and(|t| t.elapsed() >= Duration::from_millis(16) && received == 0)
+            || s.batch_first_seen
+                .is_some_and(|t| t.elapsed() >= Duration::from_millis(32));
         if should_flush {
             let events = std::mem::take(&mut s.batch_events);
             s.batch_first_seen = None;
@@ -1365,9 +1365,7 @@ fn process_event_batch(
     }
 
     for wid in &resized {
-        if !ready.contains(wid)
-            && borders.overlays.contains_key(wid)
-            && borders.sync_overlay(*wid)
+        if !ready.contains(wid) && borders.overlays.contains_key(wid) && borders.sync_overlay(*wid)
         {
             needs_resubscribe = true;
         }

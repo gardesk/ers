@@ -166,7 +166,10 @@ impl OverlayWindow {
         let path_rect = inset_for_stroke(outer_cg.size, border_width);
         unsafe {
             let path = objc2_core_graphics::CGPath::with_rounded_rect(
-                path_rect, radius, radius, ptr::null(),
+                path_rect,
+                radius,
+                radius,
+                ptr::null(),
             );
             let path_ref: *mut AnyObject =
                 objc2_core_foundation::CFRetained::as_ptr(&path).as_ptr() as *mut AnyObject;
@@ -216,8 +219,8 @@ impl OverlayWindow {
         // most layout-shift outcomes), size is identical frame-to-frame
         // and rebuilding the rounded-rect CGPath + setPath would just
         // throw away an identical path. Skip when w/h match cached.
-        let size_unchanged = (self.bounds_cg_w - w).abs() < 0.5
-            && (self.bounds_cg_h - h).abs() < 0.5;
+        let size_unchanged =
+            (self.bounds_cg_w - w).abs() < 0.5 && (self.bounds_cg_h - h).abs() < 0.5;
         // Perf audit #127: setFrame display:NO instead of YES. YES forces
         // a synchronous WindowServer round-trip; NO queues the frame for
         // the next runloop pass. For overlays with a single CAShapeLayer

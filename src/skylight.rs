@@ -239,11 +239,8 @@ unsafe extern "C" {
     /// screen capture / picker / recording — equivalent to
     /// kCGWindowSharingNone), 1 = ReadOnly, 2 = ReadWrite.
     pub fn SLSSetWindowSharingState(cid: CGSConnectionID, wid: u32, state: u32) -> CGError;
-    pub fn SLSGetWindowSharingState(
-        cid: CGSConnectionID,
-        wid: u32,
-        state_out: *mut u32,
-    ) -> CGError;
+    pub fn SLSGetWindowSharingState(cid: CGSConnectionID, wid: u32, state_out: *mut u32)
+    -> CGError;
     /// Mask of events the SLS window captures. Set to 0 to make the window
     /// click-through (mouse events pass to the window beneath).
     pub fn SLSSetWindowEventMask(cid: CGSConnectionID, wid: u32, mask: u32) -> CGError;
